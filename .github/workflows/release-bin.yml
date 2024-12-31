@@ -1,0 +1,184 @@
+on:
+    workflow_dispatch:
+        inputs:
+            version:
+                description: 'Version to deploy (format: vX.Y.Z)'
+                required: true
+            upload:
+                description: 'Upload final artifacts to R2'
+                default: 'false'
+    push:
+        tags:
+            - 'v[0-9]+.[0-9]+.[0-9]+'
+
+name: Release Tag
+
+jobs:
+    setup:
+        runs-on: ubuntu-latest
+        outputs:
+            version: ${{ steps.extract_version.outputs.version }}
+            commit: ${{ steps.extract_commit_info.outputs.commit }}
+            commit_long: ${{ steps.extract_commit_info.outputs.commit_long }}
+        steps:
+            - name: Validate Version Input
+              if: github.event_name == 'workflow_dispatch'
+              run: |
+                  if [[ ! "${{ github.event.inputs.version }}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+                    echo "Error: Version must follow the format vX.Y.Z (e.g., v1.0.0)."
+                    exit 1
+                  fi
+
+                  echo "Version is valid: ${{ github.event.inputs.version }}"
+
+            - name: Extract the Version
+              id: extract_version
+              run: |
+                  if [[ "${{ github.event_name }}" == "push" ]]; then
+                    # Remove the leading 'v' from the tag
+                    VERSION=${GITHUB_REF#refs/tags/v}
+                    echo "version=$VERSION" >> $GITHUB_OUTPUT
+                  elif [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+                    VERSION=${{ github.event.inputs.version }}
+                    VERSION=${VERSION#v}
+                    echo "version=$VERSION" >> $GITHUB_OUTPUT
+                  else
+                    echo "Error: Unsupported event type."
+                    exit 1
+                  fi
+
+            - name: Extract Commit Info
+              id: extract_commit_info
+              run: |
+                  COMMIT=$(git rev-parse --short HEAD)
+                  COMMIT_LONG=$(git rev-parse HEAD)
+                  echo "commit=$COMMIT" >> $GITHUB_OUTPUT
+                  echo "commit_long=$COMMIT_LONG" >> $GITHUB_OUTPUT
+
+            - name: Checkout code
+              uses: actions/checkout@v4
+              with:
+                  fetch-depth: 0
+
+            - name: Install Dependencies
+              run: |
+                  sudo apt update
+                  sudo apt install -y \
+                      build-essential \
+                      libbz2-dev \
+                      libbz2-1.0 \
+                      libonig-dev \
+                      libfreetype6-dev \
+                      zlib1g-dev \
+                      libpng-dev \
+                      libgtk-4-dev \
+                      libadwaita-1-dev \
+                      pandoc \
+                      libglib2.0-dev \
+                      pkg-config
+
+                  # Create symbolic links for the library
+                  sudo ln -sf /usr/lib/x86_64-linux-gnu/libbz2.so.1.0 /usr/lib/x86_64-linux-gnu/libbzip2.so
+                  sudo ln -sf /usr/lib/x86_64-linux-gnu/libbz2.a /usr/lib/x86_64-linux-gnu/libbzip2.a
+
+                  # Update library cache
+                  sudo ldconfig
+
+                  # Install zig
+                  sudo snap install --beta zig --classic
+
+            - name: Fetch Zig Dependencies
+              run: |
+                  echo "Setting up Zig cache directory..."
+                  CACHE_DIR="/tmp/offline-cache"
+                  mkdir -p "$CACHE_DIR"
+
+                  echo "Fetching Zig dependencies..."
+                  export ZIG_GLOBAL_CACHE_DIR="$CACHE_DIR"
+                  ./nix/build-support/fetch-zig-cache.sh
+
+            - name: Build Application
+              run: |
+                  echo "Building..."
+                  CACHE_DIR="/tmp/offline-cache"
+                  VERSION="${{ steps.extract_version.outputs.version }}"
+                  echo "Version: $VERSION"
+
+                  # Add environment variables to help find libraries
+                  export LD_LIBRARY_PATH="/usr/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH"
+                  export LIBRARY_PATH="/usr/lib/x86_64-linux-gnu:$LIBRARY_PATH"
+                  export C_INCLUDE_PATH="/usr/include:$C_INCLUDE_PATH"
+                  export CPLUS_INCLUDE_PATH="/usr/include:$CPLUS_INCLUDE_PATH"
+
+                  # x86_64-linux-gnu
+                  zig build --prefix $(pwd)/local-install --system "$CACHE_DIR/p" -Doptimize=ReleaseFast -Dversion-string=${VERSION} -Dcpu=baseline 
+                  if [ $? -ne 0 ]; then
+                      echo "Build failed in x86_64-linux-gnu!"
+                      exit 1
+                  fi
+
+            - name: Build DEB Package
+              run: |
+                  BUILD_DIR="$(pwd)/build"
+                  DEB_DIR="$BUILD_DIR/ghostty-${{ steps.extract_version.outputs.version }}-amd64"
+                  DESTDIR="$DEB_DIR/usr"
+                  BIN_DIR="$DESTDIR/bin"
+                  DESKTOP_DIR="$DEB_DIR/usr/share/applications"
+
+                  # Clean up old build directories
+                  rm -rf "$BUILD_DIR"
+
+                  # Step 1: Create directory structure
+                  mkdir -p "$DEB_DIR"
+                  mkdir -p "$BIN_DIR"
+                  mkdir -p "$DESKTOP_DIR"
+
+                  # Step 2: Add application binaries
+                  cp $(pwd)/local-install/bin/ghostty "$BIN_DIR/ghostty"
+
+                  # Step 3: Add and rename desktop file
+                  cp ./dist/linux/app.desktop "$DESKTOP_DIR/ghostty.desktop"
+
+                  # Step 4: Create DEBIAN control file
+                  mkdir -p "$DEB_DIR/DEBIAN"
+                  cat <<EOF > "$DEB_DIR/DEBIAN/control"
+                  Package: Ghostty
+                  Version: ${{ steps.extract_version.outputs.version }}
+                  Architecture: amd64
+                  Depends: libbz2-1.0
+                  Description: A fast, feature-rich, and cross-platform terminal emulator that uses platform-native UI and GPU acceleration.
+                  EOF
+
+                  # Step 5: Build .deb package
+                  dpkg-deb --build "$DEB_DIR"
+
+            - name: Upload DEB Artifact
+              uses: actions/upload-artifact@v4
+              with:
+                  name: deb-package
+                  path: |
+                      $GITHUB_WORKSPACE/build/ghostty-${{ steps.extract_version.outputs.version }}-amd64.deb
+
+    create-release:
+        needs: setup
+        runs-on: ubuntu-latest
+        steps:
+            - name: Download DEB Artifact
+              uses: actions/download-artifact@v4
+              with:
+                  name: deb-package
+                  path: ./artifacts
+
+            - name: Create GitHub Release
+              uses: actions/create-release@v1
+              with:
+                  tag_name: ${{ github.ref_name }}
+                  release_name: Release ${{ github.ref_name }}
+                  body: |
+                      Automated release of ${{ github.ref_name }}.
+                  draft: false
+                  prerelease: false
+                  generate_release_notes: true
+                  assets: ./artifacts/*.deb
+              env:
+                  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
