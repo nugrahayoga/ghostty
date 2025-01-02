@@ -1,0 +1,53 @@
+name: Build Ghostty Binary
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build for Debian
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Install Dependencies
+        run: |
+          curl -LO https://ziglang.org/download/0.13.0/zig-linux-x86_64-0.13.0.tar.xz
+          tar -xf zig-linux-x86_64-0.13.0.tar.xz
+          sudo mv zig-linux-x86_64-0.13.0 /opt/zig
+          sudo ln -s /opt/zig/zig /usr/local/bin/zig
+          sudo apt update
+          sudo apt install -y \
+          libgtk-4-dev \
+          libadwaita-1-dev \
+          git
+
+      - name: Build Application
+        run: |
+          zig build -Doptimize=ReleaseFast
+
+      - name: Package as .deb
+        run: |
+          mkdir -p package/DEBIAN
+          mkdir -p package/usr/local/bin
+          cp zig-out/bin/ghostty package/usr/local/bin/ghostty
+          echo "Package: ghostty
+          Version: ${GITHUB_REF_NAME#v}
+          Section: custom
+          Priority: optional
+          Architecture: amd64
+          Maintainer: Nugraha Yoga <contact@nugrahayoga.com>
+          Description: A fast, feature-rich, and cross-platform terminal emulator that uses platform-native UI and GPU acceleration.
+          dpkg-deb --build package
+
+      - name: Upload Release Asset
+        uses: actions/upload-artifact@v3
+        with:
+          name: zig-debian-package
+          path: |
+            ghostty_*.*
