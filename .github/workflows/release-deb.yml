@@ -29,14 +29,14 @@ jobs:
 
       - name: Build Application
         run: |
-          zig build -Doptimize=ReleaseFast
+          zig build -Doptimize=ReleaseFast -Dcpu=baseline 
 
       - name: Package as .deb
         run: |
           mkdir -p package/DEBIAN
           mkdir -p package/usr/local/bin
           cp zig-out/bin/ghostty package/usr/local/bin/ghostty
-          echo "Package: ghostty
+          cat <<EOF > package/DEBIAN/control
           Version: ${GITHUB_REF_NAME#v}
           Section: custom
           Priority: optional
