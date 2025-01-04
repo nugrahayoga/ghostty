@@ -1,0 +1,208 @@
+name: Build and Release Ghostty
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Specific tag to build (e.g., v1.0.1, leave empty for latest)'
+        required: false
+        default: ''
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  check-and-build:
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Get latest valid version tag
+        id: get_tag
+        run: |
+          # Get all tags and filter only v*.*.* tags, excluding 'tip'
+          UPSTREAM_TAGS=$(curl -s https://api.github.com/repos/ghostty-org/ghostty/tags | \
+            grep '"name":' | \
+            grep -o '"v[0-9][^"]*"' | \
+            tr -d '"')
+
+          if [[ -n "${{ github.event.inputs.tag }}" ]]; then
+            # For manual tag input, check if it exists
+            TAG="${{ github.event.inputs.tag }}"
+            if echo "$UPSTREAM_TAGS" | grep -q "^${TAG}$"; then
+              echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+            else
+              echo "Error: Tag ${TAG} not found in upstream repository"
+              echo "Available tags:"
+              echo "$UPSTREAM_TAGS"
+              exit 1
+            fi
+          else
+            # Get latest version tag
+            LATEST_TAG=$(echo "$UPSTREAM_TAGS" | sort -V | tail -n1)
+            echo "tag=${LATEST_TAG}" >> "$GITHUB_OUTPUT"
+          fi
+          
+          # Debug output
+          echo "Available tags:"
+          echo "$UPSTREAM_TAGS"
+          echo "Selected tag: $(cat $GITHUB_OUTPUT)"
+
+      - name: Check if tag already built
+        id: check_release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG=${{ steps.get_tag.outputs.tag }}
+          echo "Checking if release exists for tag: $TAG"
+          
+          if gh release view "$TAG" > /dev/null 2>&1; then
+            echo "Release found for tag $TAG"
+            if [[ -n "${{ github.event.inputs.tag }}" ]]; then
+              echo "Manual build requested, will rebuild"
+              echo "exists=false" >> "$GITHUB_OUTPUT"
+            else
+              echo "Automated build, skipping"
+              echo "exists=true" >> "$GITHUB_OUTPUT"
+            fi
+          else
+            echo "No release found for tag $TAG, will build"
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+          
+          echo "Final decision: $(cat $GITHUB_OUTPUT)"
+
+      - name: Install system dependencies
+        if: steps.check_release.outputs.exists == 'false'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-4-dev libadwaita-1-dev git dpkg-dev debhelper
+
+      - name: Get tagged source code
+        if: steps.check_release.outputs.exists == 'false'
+        run: |
+          TAG=${{ steps.get_tag.outputs.tag }}
+          wget "https://github.com/ghostty-org/ghostty/archive/refs/tags/${TAG}.tar.gz"
+          tar xzf "${TAG}.tar.gz"
+          mv "ghostty-${TAG#v}" ghostty  # Remove 'v' prefix from directory name
+
+      - name: Download and extract Zig
+        if: steps.check_release.outputs.exists == 'false'
+        run: |
+          wget https://ziglang.org/download/0.13.0/zig-linux-x86_64-0.13.0.tar.xz
+          tar xvf zig-linux-x86_64-0.13.0.tar.xz
+
+      - name: Build and Install Ghostty
+        if: steps.check_release.outputs.exists == 'false'
+        run: |
+          cd ghostty
+          ../zig-linux-x86_64-0.13.0/zig build -Doptimize=ReleaseFast
+          ../zig-linux-x86_64-0.13.0/zig build -Doptimize=ReleaseFast install -p ../install-root
+          
+          echo "Checking installed files:"
+          find ../install-root -type f
+
+      - name: Create Debian package structure
+        if: steps.check_release.outputs.exists == 'false'
+        run: |
+          VERSION="${{ steps.get_tag.outputs.tag }}"
+          VERSION="${VERSION#v}"
+
+          mkdir -p debian-package/DEBIAN
+          mkdir -p debian-package/usr/bin
+          mkdir -p debian-package/usr/share
+
+          cp -r install-root/bin/* debian-package/usr/bin/
+          cp -r install-root/share/* debian-package/usr/share/
+
+          chmod 755 debian-package/usr/bin/ghostty
+          chmod 644 debian-package/usr/share/applications/com.mitchellh.ghostty.desktop
+
+          cat > debian-package/DEBIAN/control << EOF
+          Package: ghostty
+          Version: ${VERSION}
+          Section: utils
+          Priority: optional
+          Architecture: amd64
+          Depends: libgtk-4-1, libadwaita-1-0
+          Maintainer: Nugraha Yoga <contact@nugrahayoga.com>
+          Description: Modern Terminal Emulator
+           Ghostty is a fast, feature-rich, and cross-platform terminal emulator
+           that uses platform-native UI and GPU acceleration.
+          EOF
+
+          echo "Final package structure:"
+          find debian-package -type f
+
+      - name: Build DEB package
+        if: steps.check_release.outputs.exists == 'false'
+        run: |
+          VERSION="${{ steps.get_tag.outputs.tag }}"
+          VERSION="${VERSION#v}"
+
+          dpkg-deb --build debian-package
+
+          echo "Checking .deb file:"
+          ls -l debian-package.deb
+
+          echo "Moving .deb file to final location"
+          mv debian-package.deb "ghostty_${VERSION}_amd64.deb"
+
+          echo "Checking final .deb file:"
+          ls -l "ghostty_${VERSION}_amd64.deb"
+          dpkg -c "ghostty_${VERSION}_amd64.deb"
+
+      - name: Package files for release
+        if: steps.check_release.outputs.exists == 'false'
+        run: |
+          VERSION="${{ steps.get_tag.outputs.tag }}"
+          VERSION="${VERSION#v}"
+
+          echo "Creating portable binary archive"
+          mkdir -p release
+          cp ghostty/zig-out/bin/ghostty release/
+          tar czf ghostty-linux-x86_64.tar.gz -C release .
+
+          echo "Checking all generated files in current directory:"
+          ls -la
+
+          echo "Checking specific files:"
+          for file in "ghostty_${VERSION}_amd64.deb" ghostty-linux-x86_64.tar.gz; do
+            if [ -f "$file" ]; then
+              echo "✓ Found $file"
+              ls -l "$file"
+            else
+              echo "✗ Missing $file"
+              exit 1
+            fi
+          done
+
+      - name: Set version
+        if: steps.check_release.outputs.exists == 'false'
+        id: version
+        run: |
+          TAG=${{ steps.get_tag.outputs.tag }}
+          echo "version=${TAG#v}" >> $GITHUB_OUTPUT
+          
+      - name: Check release files
+        if: steps.check_release.outputs.exists == 'false'
+        run: |
+          echo "Preparing to upload files for version ${{ steps.version.outputs.version }}"
+          ls -l "ghostty_${{ steps.version.outputs.version }}_amd64.deb" ghostty-linux-x86_64.tar.gz
+
+      - name: Create Release
+        if: steps.check_release.outputs.exists == 'false'
+        uses: softprops/action-gh-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ steps.get_tag.outputs.tag }}
+          files: |
+            ghostty-linux-x86_64.tar.gz
+            ghostty_${{ steps.version.outputs.version }}_amd64.deb
+          draft: false
+          prerelease: false
+          generate_release_notes: true
