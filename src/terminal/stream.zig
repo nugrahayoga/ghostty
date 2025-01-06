@@ -1605,7 +1605,7 @@ pub fn Stream(comptime Handler: type) type {
                     } else log.warn("unimplemented OSC callback: {}", .{cmd});
                 },
 
-                .progress => {
+                .progress, .sleep, .show_message_box, .change_conemu_tab_title => {
                     log.warn("unimplemented OSC callback: {}", .{cmd});
                 },
             }

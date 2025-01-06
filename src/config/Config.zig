@@ -234,9 +234,19 @@ const c = @cImport({
 /// i.e. new windows, tabs, etc.
 @"font-codepoint-map": RepeatableCodepointMap = .{},
 
-/// Draw fonts with a thicker stroke, if supported. This is only supported
-/// currently on macOS.
+/// Draw fonts with a thicker stroke, if supported.
+/// This is currently only supported on macOS.
 @"font-thicken": bool = false,
+
+/// Strength of thickening when `font-thicken` is enabled.
+///
+/// Valid values are integers between `0` and `255`. `0` does not correspond to
+/// *no* thickening, rather it corresponds to the lightest available thickening.
+///
+/// Has no effect when `font-thicken` is set to `false`.
+///
+/// This is currently only supported on macOS.
+@"font-thicken-strength": u8 = 255,
 
 /// All of the configurations behavior adjust various metrics determined by the
 /// font. The values can be integers (1, -1, etc.) or a percentage (20%, -15%,
@@ -582,13 +592,38 @@ palette: Palette = .{},
 /// On macOS, changing this configuration requires restarting Ghostty completely.
 @"background-opacity": f64 = 1.0,
 
-/// A positive value enables blurring of the background when background-opacity
-/// is less than 1. The value is the blur radius to apply. A value of 20
-/// is reasonable for a good looking blur. Higher values will cause strange
-/// rendering issues as well as performance issues.
+/// Whether to blur the background when `background-opacity` is less than 1.
 ///
-/// This is only supported on macOS.
-@"background-blur-radius": u8 = 0,
+/// Valid values are:
+///
+///   * a nonnegative integer specifying the *blur intensity*
+///   * `false`, equivalent to a blur intensity of 0
+///   * `true`, equivalent to the default blur intensity of 20, which is
+///     reasonable for a good looking blur. Higher blur intensities may
+///     cause strange rendering and performance issues.
+///
+/// Supported on macOS and on some Linux desktop environments, including:
+///
+///   * KDE Plasma (Wayland only)
+///
+/// Warning: the exact blur intensity is _ignored_ under KDE Plasma, and setting
+/// this setting to either `true` or any positive blur intensity value would
+/// achieve the same effect. The reason is that KWin, the window compositor
+/// powering Plasma, only has one global blur setting and does not allow
+/// applications to specify individual blur settings.
+///
+/// To configure KWin's global blur setting, open System Settings and go to
+/// "Apps & Windows" > "Window Management" > "Desktop Effects" and select the
+/// "Blur" plugin. If disabled, enable it by ticking the checkbox to the left.
+/// Then click on the "Configure" button and there will be two sliders that
+/// allow you to set background blur and noise intensities for all apps,
+/// including Ghostty.
+///
+/// All other Linux desktop environments are as of now unsupported. Users may
+/// need to set environment-specific settings and/or install third-party plugins
+/// in order to support background blur, as there isn't a unified interface for
+/// doing so.
+@"background-blur-radius": BackgroundBlur = .false,
 
 /// The opacity level (opposite of transparency) of an unfocused split.
 /// Unfocused splits by default are slightly faded out to make it easier to see
@@ -609,6 +644,10 @@ palette: Palette = .{},
 ///
 /// Specified as either hex (`#RRGGBB` or `RRGGBB`) or a named X11 color.
 @"unfocused-split-fill": ?Color = null,
+
+/// The color of the split divider. If this is not set, a default will be chosen.
+/// Specified as either hex (`#RRGGBB` or `RRGGBB`) or a named X11 color.
+@"split-divider-color": ?Color = null,
 
 /// The command to run, usually a shell. If this is not an absolute path, it'll
 /// be looked up in the `PATH`. If this is not set, a default will be looked up
@@ -1073,7 +1112,10 @@ keybind: Keybinds = .{},
 
 /// The font that will be used for the application's window and tab titles.
 ///
-/// This is currently only supported on macOS.
+/// If this setting is left unset, the system default font will be used.
+///
+/// Note: any font available on the system may be used, this font is not
+/// required to be a fixed-width font.
 @"window-title-font-family": ?[:0]const u8 = null,
 
 /// The theme to use for the windows. Valid values:
@@ -2158,6 +2200,25 @@ pub fn default(alloc_gpa: Allocator) Allocator.Error!Config {
     );
 
     {
+        // On non-MacOS desktop envs (Windows, KDE, Gnome, Xfce), ctrl+insert is an
+        // alt keybinding for Copy and shift+ins is an alt keybinding for Paste
+        //
+        // The order of these blocks is important. The *last* added keybind for a given action is
+        // what will display in the menu. We want the more typical keybinds after this block to be
+        // the standard
+        if (!builtin.target.isDarwin()) {
+            try result.keybind.set.put(
+                alloc,
+                .{ .key = .{ .translated = .insert }, .mods = .{ .ctrl = true } },
+                .{ .copy_to_clipboard = {} },
+            );
+            try result.keybind.set.put(
+                alloc,
+                .{ .key = .{ .translated = .insert }, .mods = .{ .shift = true } },
+                .{ .paste_from_clipboard = {} },
+            );
+        }
+
         // On macOS we default to super but Linux ctrl+shift since
         // ctrl+c is to kill the process.
         const mods: inputpkg.Mods = if (builtin.target.isDarwin())
@@ -2175,20 +2236,6 @@ pub fn default(alloc_gpa: Allocator) Allocator.Error!Config {
             .{ .key = .{ .translated = .v }, .mods = mods },
             .{ .paste_from_clipboard = {} },
         );
-        // On non-MacOS desktop envs (Windows, KDE, Gnome, Xfce), ctrl+insert is an
-        // alt keybinding for Copy and shift+ins is an alt keybinding for Paste
-        if (!builtin.target.isDarwin()) {
-            try result.keybind.set.put(
-                alloc,
-                .{ .key = .{ .translated = .insert }, .mods = .{ .ctrl = true } },
-                .{ .copy_to_clipboard = {} },
-            );
-            try result.keybind.set.put(
-                alloc,
-                .{ .key = .{ .translated = .insert }, .mods = .{ .shift = true } },
-                .{ .paste_from_clipboard = {} },
-            );
-        }
     }
 
     // Increase font size mapping for keyboards with dedicated plus keys (like german)
@@ -3033,25 +3080,31 @@ pub fn loadRecursiveFiles(self: *Config, alloc_gpa: Allocator) !void {
 
         // We must only load a unique file once
         if (try loaded.fetchPut(path, {}) != null) {
-            try self._diagnostics.append(arena_alloc, .{
+            const diag: cli.Diagnostic = .{
                 .message = try std.fmt.allocPrintZ(
                     arena_alloc,
                     "config-file {s}: cycle detected",
                     .{path},
                 ),
-            });
+            };
+
+            try self._diagnostics.append(arena_alloc, diag);
+            try self._replay_steps.append(arena_alloc, .{ .diagnostic = diag });
             continue;
         }
 
         var file = std.fs.openFileAbsolute(path, .{}) catch |err| {
             if (err != error.FileNotFound or !optional) {
-                try self._diagnostics.append(arena_alloc, .{
+                const diag: cli.Diagnostic = .{
                     .message = try std.fmt.allocPrintZ(
                         arena_alloc,
                         "error opening config-file {s}: {}",
                         .{ path, err },
                     ),
-                });
+                };
+
+                try self._diagnostics.append(arena_alloc, diag);
+                try self._replay_steps.append(arena_alloc, .{ .diagnostic = diag });
             }
             continue;
         };
@@ -3061,13 +3114,16 @@ pub fn loadRecursiveFiles(self: *Config, alloc_gpa: Allocator) !void {
         switch (stat.kind) {
             .file => {},
             else => |kind| {
-                try self._diagnostics.append(arena_alloc, .{
+                const diag: cli.Diagnostic = .{
                     .message = try std.fmt.allocPrintZ(
                         arena_alloc,
                         "config-file {s}: not reading because file type is {s}",
                         .{ path, @tagName(kind) },
                     ),
-                });
+                };
+
+                try self._diagnostics.append(arena_alloc, diag);
+                try self._replay_steps.append(arena_alloc, .{ .diagnostic = diag });
                 continue;
             },
         }
@@ -3217,7 +3273,7 @@ fn loadTheme(self: *Config, theme: Theme) !void {
     // Setup our replay to be conditional.
     conditional: for (new_config._replay_steps.items) |*item| {
         switch (item.*) {
-            .expand => {},
+            .expand, .diagnostic => {},
 
             // If we see "-e" then we do NOT make the following arguments
             // conditional since they are supposed to be part of the
@@ -3769,6 +3825,16 @@ const Replay = struct {
             arg: []const u8,
         },
 
+        /// A diagnostic to be added to the new configuration when
+        /// replayed. This should only be used for diagnostics that won't
+        /// be reproduced during playback. For example, `config-file`
+        /// errors are not reloaded so they should be added here.
+        ///
+        /// Diagnostics cannot be conditional. They are always present
+        /// even if the conditionals don't match. This helps users find
+        /// errors in their configuration.
+        diagnostic: cli.Diagnostic,
+
         /// The start of a "-e" argument. This marks the end of
         /// traditional configuration and the beginning of the
         /// "-e" initial command magic. This is separate from "arg"
@@ -3785,6 +3851,7 @@ const Replay = struct {
         ) Allocator.Error!Step {
             return switch (self) {
                 .@"-e" => self,
+                .diagnostic => |v| .{ .diagnostic = try v.clone(alloc) },
                 .arg => |v| .{ .arg = try alloc.dupe(u8, v) },
                 .expand => |v| .{ .expand = try alloc.dupe(u8, v) },
                 .conditional_arg => |v| conditional: {
@@ -3818,6 +3885,20 @@ const Replay = struct {
                         // world state changed and we can't expand anymore.
                         // In that really unfortunate case, we log a warning.
                         log.warn("error expanding paths err={}", .{err});
+                    },
+
+                    .diagnostic => |diag| diag: {
+                        // Best effort to clone and append the diagnostic.
+                        // If it fails we log a warning and continue.
+                        const arena_alloc = self.config._arena.?.allocator();
+                        const cloned = diag.clone(arena_alloc) catch |err| {
+                            log.warn("error cloning diagnostic err={}", .{err});
+                            break :diag;
+                        };
+                        self.config._diagnostics.append(arena_alloc, cloned) catch |err| {
+                            log.warn("error appending diagnostic err={}", .{err});
+                            break :diag;
+                        };
                     },
 
                     .conditional_arg => |v| conditional: {
@@ -5623,6 +5704,70 @@ pub const AutoUpdate = enum {
     off,
     check,
     download,
+};
+
+/// See background-blur-radius
+pub const BackgroundBlur = union(enum) {
+    false,
+    true,
+    radius: u8,
+
+    pub fn parseCLI(self: *BackgroundBlur, input: ?[]const u8) !void {
+        const input_ = input orelse {
+            // Emulate behavior for bools
+            self.* = .true;
+            return;
+        };
+
+        self.* = if (cli.args.parseBool(input_)) |b|
+            if (b) .true else .false
+        else |_|
+            .{ .radius = std.fmt.parseInt(
+                u8,
+                input_,
+                0,
+            ) catch return error.InvalidValue };
+    }
+
+    pub fn cval(self: BackgroundBlur) u8 {
+        return switch (self) {
+            .false => 0,
+            .true => 20,
+            .radius => |v| v,
+        };
+    }
+
+    pub fn formatEntry(
+        self: BackgroundBlur,
+        formatter: anytype,
+    ) !void {
+        switch (self) {
+            .false => try formatter.formatEntry(bool, false),
+            .true => try formatter.formatEntry(bool, true),
+            .radius => |v| try formatter.formatEntry(u8, v),
+        }
+    }
+
+    test "parse BackgroundBlur" {
+        const testing = std.testing;
+        var v: BackgroundBlur = undefined;
+
+        try v.parseCLI(null);
+        try testing.expectEqual(.true, v);
+
+        try v.parseCLI("true");
+        try testing.expectEqual(.true, v);
+
+        try v.parseCLI("false");
+        try testing.expectEqual(.false, v);
+
+        try v.parseCLI("42");
+        try testing.expectEqual(42, v.radius);
+
+        try testing.expectError(error.InvalidValue, v.parseCLI(""));
+        try testing.expectError(error.InvalidValue, v.parseCLI("aaaa"));
+        try testing.expectError(error.InvalidValue, v.parseCLI("420"));
+    }
 };
 
 /// See theme
