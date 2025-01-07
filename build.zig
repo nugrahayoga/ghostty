@@ -145,7 +145,6 @@ pub fn build(b: *std.Build) !void {
                     if (std.mem.indexOf(u8, stdout.items, "wayland")) |_| wayland = true;
                 } else {
                     std.log.warn("pkg-config: {s} with code {d}", .{ @tagName(term), code });
-                    return error.Unexpected;
                 }
             },
             inline else => |code| {
@@ -630,6 +629,7 @@ pub fn build(b: *std.Build) !void {
         _ = wf.add("syntax/ghostty.vim", config_vim.syntax);
         _ = wf.add("ftdetect/ghostty.vim", config_vim.ftdetect);
         _ = wf.add("ftplugin/ghostty.vim", config_vim.ftplugin);
+        _ = wf.add("compiler/ghostty.vim", config_vim.compiler);
         b.installDirectory(.{
             .source_dir = wf.getDirectory(),
             .install_dir = .prefix,
@@ -646,6 +646,7 @@ pub fn build(b: *std.Build) !void {
         _ = wf.add("syntax/ghostty.vim", config_vim.syntax);
         _ = wf.add("ftdetect/ghostty.vim", config_vim.ftdetect);
         _ = wf.add("ftplugin/ghostty.vim", config_vim.ftplugin);
+        _ = wf.add("compiler/ghostty.vim", config_vim.compiler);
         b.installDirectory(.{
             .source_dir = wf.getDirectory(),
             .install_dir = .prefix,
