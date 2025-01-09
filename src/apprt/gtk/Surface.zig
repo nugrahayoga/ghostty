@@ -347,6 +347,11 @@ cursor: ?*c.GdkCursor = null,
 /// pass it to GTK.
 title_text: ?[:0]const u8 = null,
 
+/// Our current working directory. We use this value for setting tooltips in
+/// the headerbar subtitle if we have focus. When set, the text in this buf
+/// will be null-terminated because we need to pass it to GTK.
+pwd: ?[:0]const u8 = null,
+
 /// The timer used to delay title updates in order to prevent flickering.
 update_title_timer: ?c.guint = null,
 
@@ -492,6 +497,17 @@ pub fn init(self: *Surface, app: *App, opts: Options) !void {
     c.gtk_widget_set_focusable(gl_area, 1);
     c.gtk_widget_set_focus_on_click(gl_area, 1);
 
+    // Set up to handle items being dropped on our surface. Files can be dropped
+    // from Nautilus and strings can be dropped from many programs.
+    const drop_target = c.gtk_drop_target_new(c.G_TYPE_INVALID, c.GDK_ACTION_COPY);
+    errdefer c.g_object_unref(drop_target);
+    var drop_target_types = [_]c.GType{
+        c.gdk_file_list_get_type(),
+        c.G_TYPE_STRING,
+    };
+    c.gtk_drop_target_set_gtypes(drop_target, @ptrCast(&drop_target_types), drop_target_types.len);
+    c.gtk_widget_add_controller(@ptrCast(overlay), @ptrCast(drop_target));
+
     // Inherit the parent's font size if we have a parent.
     const font_size: ?font.face.DesiredSize = font_size: {
         if (!app.config.@"window-inherit-font-size") break :font_size null;
@@ -574,6 +590,7 @@ pub fn init(self: *Surface, app: *App, opts: Options) !void {
     _ = c.g_signal_connect_data(im_context, "preedit-changed", c.G_CALLBACK(&gtkInputPreeditChanged), self, null, c.G_CONNECT_DEFAULT);
     _ = c.g_signal_connect_data(im_context, "preedit-end", c.G_CALLBACK(&gtkInputPreeditEnd), self, null, c.G_CONNECT_DEFAULT);
     _ = c.g_signal_connect_data(im_context, "commit", c.G_CALLBACK(&gtkInputCommit), self, null, c.G_CONNECT_DEFAULT);
+    _ = c.g_signal_connect_data(drop_target, "drop", c.G_CALLBACK(&gtkDrop), self, null, c.G_CONNECT_DEFAULT);
 }
 
 fn realize(self: *Surface) !void {
@@ -628,6 +645,7 @@ fn realize(self: *Surface) !void {
 pub fn deinit(self: *Surface) void {
     self.init_config.deinit(self.app.core_app.alloc);
     if (self.title_text) |title| self.app.core_app.alloc.free(title);
+    if (self.pwd) |pwd| self.app.core_app.alloc.free(pwd);
 
     // We don't allocate anything if we aren't realized.
     if (!self.realized) return;
@@ -840,6 +858,28 @@ pub fn setInitialWindowSize(self: *const Surface, width: u32, height: u32) !void
     );
 }
 
+pub fn setSizeLimits(self: *const Surface, min: apprt.SurfaceSize, max_: ?apprt.SurfaceSize) !void {
+
+    // There's no support for setting max size at the moment.
+    _ = max_;
+
+    // If we are within a split, do not set the size.
+    if (self.container.split() != null) return;
+
+    // This operation only makes sense if we're within a window view
+    // hierarchy and we're the first tab in the window.
+    const window = self.container.window() orelse return;
+    if (window.notebook.nPages() > 1) return;
+
+    // Note: this doesn't properly take into account the window decorations.
+    // I'm not currently sure how to do that.
+    c.gtk_widget_set_size_request(
+        @ptrCast(window.window),
+        @intCast(min.width),
+        @intCast(min.height),
+    );
+}
+
 pub fn grabFocus(self: *Surface) void {
     if (self.container.tab()) |tab| {
         // If any other surface was focused and zoomed in, set it to non zoomed in
@@ -876,7 +916,7 @@ fn updateTitleLabels(self: *Surface) void {
             // I don't know a way around this yet. I've tried re-hiding the
             // cursor after setting the title but it doesn't work, I think
             // due to some gtk event loop things...
-            c.gtk_window_set_title(window.window, title.ptr);
+            window.setTitle(title);
         }
     }
 }
@@ -929,11 +969,27 @@ pub fn getTitle(self: *Surface) ?[:0]const u8 {
     return null;
 }
 
+/// Set the current working directory of the surface.
+///
+/// In addition, update the tab's tooltip text, and if we are the focused child,
+/// update the subtitle of the containing window.
 pub fn setPwd(self: *Surface, pwd: [:0]const u8) !void {
-    // If we have a tab and are the focused child, then we have to update the tab
     if (self.container.tab()) |tab| {
         tab.setTooltipText(pwd);
+
+        if (tab.focus_child == self) {
+            if (self.container.window()) |window| {
+                if (self.app.config.@"window-subtitle" == .@"working-directory") window.setSubtitle(pwd);
+            }
+        }
     }
+
+    const alloc = self.app.core_app.alloc;
+
+    // Failing to set the surface's current working directory is not a big
+    // deal since we just used our slice parameter which is the same value.
+    if (self.pwd) |old| alloc.free(old);
+    self.pwd = alloc.dupeZ(u8, pwd) catch null;
 }
 
 pub fn setMouseShape(
@@ -1224,7 +1280,7 @@ fn showContextMenu(self: *Surface, x: f32, y: f32) void {
     };
 
     c.gtk_popover_set_pointing_to(@ptrCast(@alignCast(window.context_menu)), &rect);
-    self.app.refreshContextMenu(self.core_surface.hasSelection());
+    self.app.refreshContextMenu(window.window, self.core_surface.hasSelection());
     c.gtk_popover_popup(@ptrCast(@alignCast(window.context_menu)));
 }
 
@@ -1896,6 +1952,12 @@ fn gtkFocusEnter(_: *c.GtkEventControllerFocus, ud: ?*anyopaque) callconv(.C) vo
         self.unfocused_widget = null;
     }
 
+    if (self.pwd) |pwd| {
+        if (self.container.window()) |window| {
+            if (self.app.config.@"window-subtitle" == .@"working-directory") window.setSubtitle(pwd);
+        }
+    }
+
     // Notify our surface
     self.core_surface.focusCallback(true) catch |err| {
         log.err("error in focus callback err={}", .{err});
@@ -2024,4 +2086,96 @@ pub fn setSplitZoom(self: *Surface, new_split_zoom: bool) void {
 
 pub fn toggleSplitZoom(self: *Surface) void {
     self.setSplitZoom(!self.zoomed_in);
+}
+
+/// Handle items being dropped on our surface.
+fn gtkDrop(
+    _: *c.GtkDropTarget,
+    value: *c.GValue,
+    x: f64,
+    y: f64,
+    ud: ?*anyopaque,
+) callconv(.C) c.gboolean {
+    _ = x;
+    _ = y;
+    const self = userdataSelf(ud.?);
+    const alloc = self.app.core_app.alloc;
+
+    if (g_value_holds(value, c.G_TYPE_BOXED)) {
+        var data = std.ArrayList(u8).init(alloc);
+        defer data.deinit();
+
+        var shell_escape_writer: internal_os.ShellEscapeWriter(std.ArrayList(u8).Writer) = .{
+            .child_writer = data.writer(),
+        };
+        const writer = shell_escape_writer.writer();
+
+        const fl: *c.GdkFileList = @ptrCast(c.g_value_get_boxed(value));
+        var l = c.gdk_file_list_get_files(fl);
+
+        while (l != null) : (l = l.*.next) {
+            const file: *c.GFile = @ptrCast(l.*.data);
+            const path = c.g_file_get_path(file) orelse continue;
+
+            writer.writeAll(std.mem.span(path)) catch |err| {
+                log.err("unable to write path to buffer: {}", .{err});
+                continue;
+            };
+            writer.writeAll("\n") catch |err| {
+                log.err("unable to write to buffer: {}", .{err});
+                continue;
+            };
+        }
+
+        const string = data.toOwnedSliceSentinel(0) catch |err| {
+            log.err("unable to convert to a slice: {}", .{err});
+            return 1;
+        };
+        defer alloc.free(string);
+
+        self.doPaste(string);
+
+        return 1;
+    }
+
+    if (g_value_holds(value, c.G_TYPE_STRING)) {
+        if (c.g_value_get_string(value)) |string| {
+            self.doPaste(std.mem.span(string));
+        }
+        return 1;
+    }
+
+    return 1;
+}
+
+fn doPaste(self: *Surface, data: [:0]const u8) void {
+    if (data.len == 0) return;
+
+    self.core_surface.completeClipboardRequest(.paste, data, false) catch |err| switch (err) {
+        error.UnsafePaste,
+        error.UnauthorizedPaste,
+        => {
+            ClipboardConfirmationWindow.create(
+                self.app,
+                data,
+                &self.core_surface,
+                .paste,
+            ) catch |window_err| {
+                log.err("failed to create clipboard confirmation window err={}", .{window_err});
+            };
+        },
+        error.OutOfMemory,
+        error.NoSpaceLeft,
+        => log.err("failed to complete clipboard request err={}", .{err}),
+    };
+}
+
+/// Check a GValue to see what's type its wrapping. This is equivalent to GTK's
+/// `G_VALUE_HOLDS` macro but Zig's C translator does not like it.
+fn g_value_holds(value_: ?*c.GValue, g_type: c.GType) bool {
+    if (value_) |value| {
+        if (value.*.g_type == g_type) return true;
+        return c.g_type_check_value_holds(value, g_type) != 0;
+    }
+    return false;
 }

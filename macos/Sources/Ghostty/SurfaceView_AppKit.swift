@@ -828,8 +828,28 @@ extension Ghostty {
             var handled: Bool = false
             if let list = keyTextAccumulator, list.count > 0 {
                 handled = true
-                for text in list {
-                    _ = keyAction(action, event: event, text: text)
+
+                // This is a hack. libghostty on macOS treats ctrl input as not having
+                // text because some keyboard layouts generate bogus characters for
+                // ctrl+key. libghostty can't tell this is from an IM keyboard giving
+                // us direct values. So, we just remove control.
+                var modifierFlags = event.modifierFlags
+                modifierFlags.remove(.control)
+                if let keyTextEvent = NSEvent.keyEvent(
+                    with: .keyDown,
+                    location: event.locationInWindow,
+                    modifierFlags: modifierFlags,
+                    timestamp: event.timestamp,
+                    windowNumber: event.windowNumber,
+                    context: nil,
+                    characters: event.characters ?? "",
+                    charactersIgnoringModifiers: event.charactersIgnoringModifiers ?? "",
+                    isARepeat: event.isARepeat,
+                    keyCode: event.keyCode
+                ) {
+                    for text in list {
+                        _ = keyAction(action, event: keyTextEvent, text: text)
+                    }
                 }
             }
 
@@ -1122,6 +1142,14 @@ extension Ghostty {
         @IBAction func pasteAsPlainText(_ sender: Any?) {
             guard let surface = self.surface else { return }
             let action = "paste_from_clipboard"
+            if (!ghostty_surface_binding_action(surface, action, UInt(action.count))) {
+                AppDelegate.logger.warning("action failed action=\(action)")
+            }
+        }
+
+        @IBAction func pasteSelection(_ sender: Any?) {
+            guard let surface = self.surface else { return }
+            let action = "paste_from_selection"
             if (!ghostty_surface_binding_action(surface, action, UInt(action.count))) {
                 AppDelegate.logger.warning("action failed action=\(action)")
             }
@@ -1446,5 +1474,21 @@ extension Ghostty.SurfaceView: NSServicesMenuRequestor {
         }
 
         return true
+    }
+}
+
+// MARK: NSMenuItemValidation
+
+extension Ghostty.SurfaceView: NSMenuItemValidation {
+    func validateMenuItem(_ item: NSMenuItem) -> Bool {
+        switch item.action {
+        case #selector(pasteSelection):
+            let pb = NSPasteboard.ghosttySelection
+            guard let str = pb.getOpinionatedStringContents() else { return false }
+            return !str.isEmpty
+
+        default:
+            return true
+        }
     }
 }

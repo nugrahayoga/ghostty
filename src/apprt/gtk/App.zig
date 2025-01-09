@@ -111,12 +111,12 @@ pub fn init(core_app: *CoreApp, opts: Options) !App {
     // Disabling Vulkan can improve startup times by hundreds of
     // milliseconds on some systems. We don't use Vulkan so we can just
     // disable it.
-    if (version.atLeast(4, 16, 0)) {
+    if (version.runtimeAtLeast(4, 16, 0)) {
         // From gtk 4.16, GDK_DEBUG is split into GDK_DEBUG and GDK_DISABLE.
         // For the remainder of "why" see the 4.14 comment below.
         _ = internal_os.setenv("GDK_DISABLE", "gles-api,vulkan");
         _ = internal_os.setenv("GDK_DEBUG", "opengl,gl-no-fractional");
-    } else if (version.atLeast(4, 14, 0)) {
+    } else if (version.runtimeAtLeast(4, 14, 0)) {
         // We need to export GDK_DEBUG to run on Wayland after GTK 4.14.
         // Older versions of GTK do not support these values so it is safe
         // to always set this. Forwards versions are uncertain so we'll have to
@@ -138,7 +138,7 @@ pub fn init(core_app: *CoreApp, opts: Options) !App {
         _ = internal_os.setenv("GDK_DEBUG", "vulkan-disable");
     }
 
-    if (version.atLeast(4, 14, 0)) {
+    if (version.runtimeAtLeast(4, 14, 0)) {
         // We need to export GSK_RENDERER to opengl because GTK uses ngl by
         // default after 4.14
         _ = internal_os.setenv("GSK_RENDERER", "opengl");
@@ -477,6 +477,7 @@ pub fn performAction(
         .toggle_fullscreen => self.toggleFullscreen(target, value),
 
         .new_tab => try self.newTab(target),
+        .close_tab => try self.closeTab(target),
         .goto_tab => self.gotoTab(target, value),
         .move_tab => self.moveTab(target, value),
         .new_split => try self.newSplit(target, value),
@@ -492,6 +493,7 @@ pub fn performAction(
         .pwd => try self.setPwd(target, value),
         .present_terminal => self.presentTerminal(target),
         .initial_size => try self.setInitialSize(target, value),
+        .size_limit => try self.setSizeLimit(target, value),
         .mouse_visibility => self.setMouseVisibility(target, value),
         .mouse_shape => try self.setMouseShape(target, value),
         .mouse_over_link => self.setMouseOverLink(target, value),
@@ -504,7 +506,6 @@ pub fn performAction(
         .close_all_windows,
         .toggle_quick_terminal,
         .toggle_visibility,
-        .size_limit,
         .cell_size,
         .secure_input,
         .key_sequence,
@@ -528,6 +529,23 @@ fn newTab(_: *App, target: apprt.Target) !void {
             };
 
             try window.newTab(v);
+        },
+    }
+}
+
+fn closeTab(_: *App, target: apprt.Target) !void {
+    switch (target) {
+        .app => {},
+        .surface => |v| {
+            const tab = v.rt_surface.container.tab() orelse {
+                log.info(
+                    "close_tab invalid for container={s}",
+                    .{@tagName(v.rt_surface.container)},
+                );
+                return;
+            };
+
+            tab.window.closeTab(tab);
         },
     }
 }
@@ -805,6 +823,23 @@ fn setInitialSize(
     }
 }
 
+fn setSizeLimit(
+    _: *App,
+    target: apprt.Target,
+    value: apprt.action.SizeLimit,
+) !void {
+    switch (target) {
+        .app => {},
+        .surface => |v| try v.rt_surface.setSizeLimits(.{
+                    .width = value.min_width,
+                    .height = value.min_height,
+                }, if (value.max_width > 0) .{
+                    .width = value.max_width,
+                    .height = value.max_height,
+                } else null),
+    }
+}
+
 fn showDesktopNotification(
     self: *App,
     target: apprt.Target,
@@ -1028,7 +1063,7 @@ fn loadRuntimeCss(
         , .{ .font_family = font_family });
     }
 
-    if (version.atLeast(4, 16, 0)) {
+    if (version.runtimeAtLeast(4, 16, 0)) {
         switch (window_theme) {
             .ghostty => try writer.print(
                 \\:root {{
@@ -1041,6 +1076,8 @@ fn loadRuntimeCss(
                 \\  --overview-bg-color: var(--ghostty-bg);
                 \\  --popover-fg-color: var(--ghostty-fg);
                 \\  --popover-bg-color: var(--ghostty-bg);
+                \\  --window-fg-color: var(--ghostty-fg);
+                \\  --window-bg-color: var(--ghostty-bg);
                 \\}}
                 \\windowhandle {{
                 \\  background-color: var(--headerbar-bg-color);
@@ -1741,6 +1778,7 @@ fn initMenu(self: *App) void {
         c.g_menu_append_section(menu, null, @ptrCast(@alignCast(section)));
         c.g_menu_append(section, "New Window", "win.new_window");
         c.g_menu_append(section, "New Tab", "win.new_tab");
+        c.g_menu_append(section, "Close Tab", "win.close_tab");
         c.g_menu_append(section, "Split Right", "win.split_right");
         c.g_menu_append(section, "Split Down", "win.split_down");
         c.g_menu_append(section, "Close Window", "win.close");
@@ -1756,12 +1794,6 @@ fn initMenu(self: *App) void {
         c.g_menu_append(section, "About Ghostty", "win.about");
     }
 
-    // {
-    //     const section = c.g_menu_new();
-    //     defer c.g_object_unref(section);
-    //     c.g_menu_append_submenu(menu, "File", @ptrCast(@alignCast(section)));
-    // }
-
     self.menu = menu;
 }
 
@@ -1769,7 +1801,13 @@ fn initContextMenu(self: *App) void {
     const menu = c.g_menu_new();
     errdefer c.g_object_unref(menu);
 
-    createContextMenuCopyPasteSection(menu, false);
+    {
+        const section = c.g_menu_new();
+        defer c.g_object_unref(section);
+        c.g_menu_append_section(menu, null, @ptrCast(@alignCast(section)));
+        c.g_menu_append(section, "Copy", "win.copy");
+        c.g_menu_append(section, "Paste", "win.paste");
+    }
 
     {
         const section = c.g_menu_new();
@@ -1790,18 +1828,9 @@ fn initContextMenu(self: *App) void {
     self.context_menu = menu;
 }
 
-fn createContextMenuCopyPasteSection(menu: ?*c.GMenu, has_selection: bool) void {
-    const section = c.g_menu_new();
-    defer c.g_object_unref(section);
-    c.g_menu_prepend_section(menu, null, @ptrCast(@alignCast(section)));
-    // FIXME: Feels really hackish, but disabling sensitivity on this doesn't seems to work(?)
-    c.g_menu_append(section, "Copy", if (has_selection) "win.copy" else "noop");
-    c.g_menu_append(section, "Paste", "win.paste");
-}
-
-pub fn refreshContextMenu(self: *App, has_selection: bool) void {
-    c.g_menu_remove(self.context_menu, 0);
-    createContextMenuCopyPasteSection(self.context_menu, has_selection);
+pub fn refreshContextMenu(_: *App, window: ?*c.GtkWindow, has_selection: bool) void {
+    const action: ?*c.GSimpleAction = @ptrCast(c.g_action_map_lookup_action(@ptrCast(window), "copy"));
+    c.g_simple_action_set_enabled(action, if (has_selection) 1 else 0);
 }
 
 fn isValidAppId(app_id: [:0]const u8) bool {
