@@ -259,6 +259,10 @@ pub const Action = union(enum) {
     paste_from_clipboard: void,
     paste_from_selection: void,
 
+    /// Copy the URL under the cursor to the clipboard. If there is no
+    /// URL under the cursor, this does nothing.
+    copy_url_to_clipboard: void,
+
     /// Increase/decrease the font size by a certain amount.
     increase_font_size: f32,
     decrease_font_size: f32,
@@ -374,6 +378,10 @@ pub const Action = union(enum) {
     /// This only closes ONE surface. This will trigger close confirmation as
     /// configured.
     close_surface: void,
+
+    /// Close the current tab, regardless of how many splits there may be.
+    /// This will trigger close confirmation as configured.
+    close_tab: void,
 
     /// Close the window, regardless of how many tabs or splits there may be.
     /// This will trigger close confirmation as configured.
@@ -707,6 +715,7 @@ pub const Action = union(enum) {
             .cursor_key,
             .reset,
             .copy_to_clipboard,
+            .copy_url_to_clipboard,
             .paste_from_clipboard,
             .paste_from_selection,
             .increase_font_size,
@@ -726,6 +735,7 @@ pub const Action = union(enum) {
             .write_screen_file,
             .write_selection_file,
             .close_surface,
+            .close_tab,
             .close_window,
             .toggle_fullscreen,
             .toggle_window_decorations,

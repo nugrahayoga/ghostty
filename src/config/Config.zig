@@ -32,7 +32,7 @@ const url = @import("url.zig");
 const Key = @import("key.zig").Key;
 const KeyValue = @import("key.zig").Value;
 const ErrorList = @import("ErrorList.zig");
-const MetricModifier = fontpkg.face.Metrics.Modifier;
+const MetricModifier = fontpkg.Metrics.Modifier;
 const help_strings = @import("help_strings");
 
 const log = std.log.scoped(.config);
@@ -1120,6 +1120,15 @@ keybind: Keybinds = .{},
 /// required to be a fixed-width font.
 @"window-title-font-family": ?[:0]const u8 = null,
 
+/// The text that will be displayed in the subtitle of the window. Valid values:
+///
+///   * `false` - Disable the subtitle.
+///   * `working-directory` - Set the subtitle to the working directory of the
+///      surface.
+///
+/// This feature is only supported on GTK with Adwaita enabled.
+@"window-subtitle": WindowSubtitle = .false,
+
 /// The theme to use for the windows. Valid values:
 ///
 ///   * `auto` - Determine the theme based on the configured terminal
@@ -1389,13 +1398,10 @@ keybind: Keybinds = .{},
 /// and the system clipboard on macOS. Middle-click paste is always enabled
 /// even if this is `false`.
 ///
-/// The default value is true on Linux and false on macOS. macOS copy on
-/// select behavior is not typical for applications so it is disabled by
-/// default. On Linux, this is a standard behavior so it is enabled by
-/// default.
+/// The default value is true on Linux and macOS.
 @"copy-on-select": CopyOnSelect = switch (builtin.os.tag) {
     .linux => .true,
-    .macos => .false,
+    .macos => .true,
     else => .false,
 },
 
@@ -1560,6 +1566,23 @@ keybind: Keybinds = .{},
 /// Automatically hide the quick terminal when focus shifts to another window.
 /// Set it to false for the quick terminal to remain open even when it loses focus.
 @"quick-terminal-autohide": bool = true,
+
+/// This configuration option determines the behavior of the quick terminal
+/// when switching between macOS spaces. macOS spaces are virtual desktops
+/// that can be manually created or are automatically created when an
+/// application is in full-screen mode.
+///
+/// Valid values are:
+///
+///  * `move` - When switching to another space, the quick terminal will
+///    also moved to the current space.
+///
+///  * `remain` - The quick terminal will stay only in the space where it
+///    was originally opened and will not follow when switching to another
+///    space.
+///
+/// The default value is `move`.
+@"quick-terminal-space-behavior": QuickTerminalSpaceBehavior = .move,
 
 /// Whether to enable shell integration auto-injection or not. Shell integration
 /// greatly enhances the terminal experience by enabling a number of features:
@@ -2369,6 +2392,11 @@ pub fn default(alloc_gpa: Allocator) Allocator.Error!Config {
         );
         try result.keybind.set.put(
             alloc,
+            .{ .key = .{ .translated = .w }, .mods = .{ .ctrl = true, .shift = true } },
+            .{ .close_tab = {} },
+        );
+        try result.keybind.set.put(
+            alloc,
             .{ .key = .{ .translated = .left }, .mods = .{ .ctrl = true, .shift = true } },
             .{ .previous_tab = {} },
         );
@@ -2634,6 +2662,11 @@ pub fn default(alloc_gpa: Allocator) Allocator.Error!Config {
         );
         try result.keybind.set.put(
             alloc,
+            .{ .key = .{ .translated = .w }, .mods = .{ .super = true, .alt = true } },
+            .{ .close_tab = {} },
+        );
+        try result.keybind.set.put(
+            alloc,
             .{ .key = .{ .translated = .w }, .mods = .{ .super = true, .shift = true } },
             .{ .close_window = {} },
         );
@@ -2749,6 +2782,13 @@ pub fn default(alloc_gpa: Allocator) Allocator.Error!Config {
             .{ .toggle_fullscreen = {} },
         );
 
+        // Selection clipboard paste, matches Terminal.app
+        try result.keybind.set.put(
+            alloc,
+            .{ .key = .{ .translated = .v }, .mods = .{ .super = true, .shift = true } },
+            .{ .paste_from_selection = {} },
+        );
+
         // "Natural text editing" keybinds. This forces these keys to go back
         // to legacy encoding (not fixterms). It seems macOS users more than
         // others are used to these keys so we set them as defaults. If
@@ -2767,7 +2807,7 @@ pub fn default(alloc_gpa: Allocator) Allocator.Error!Config {
         try result.keybind.set.put(
             alloc,
             .{ .key = .{ .translated = .backspace }, .mods = .{ .super = true } },
-            .{ .esc = "\x15" },
+            .{ .text = "\\x15" },
         );
         try result.keybind.set.put(
             alloc,
@@ -3968,6 +4008,11 @@ pub const WindowPaddingColor = enum {
     background,
     extend,
     @"extend-always",
+};
+
+pub const WindowSubtitle = enum {
+    false,
+    @"working-directory",
 };
 
 /// Color represents a color using RGB.
@@ -5675,6 +5720,12 @@ pub const QuickTerminalScreen = enum {
     main,
     mouse,
     @"macos-menu-bar",
+};
+
+// See quick-terminal-space-behavior
+pub const QuickTerminalSpaceBehavior = enum {
+    remain,
+    move,
 };
 
 /// See grapheme-width-method

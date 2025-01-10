@@ -247,10 +247,10 @@ jobs:
         run: |
           # Get the zig version from build.zig so that it only needs to be updated
           $fileContent = Get-Content -Path "build.zig" -Raw
-          $pattern = 'const required_zig = "(.*?)";'
+          $pattern = 'buildpkg\.requireZig\("(.*?)"\);'
           $zigVersion = [regex]::Match($fileContent, $pattern).Groups[1].Value
-          Write-Output $version
           $version = "zig-windows-x86_64-$zigVersion"
+          Write-Output $version
           $uri = "https://ziglang.org/download/$zigVersion/$version.zip"
           Invoke-WebRequest -Uri "$uri" -OutFile ".\zig-windows.zip"
           Expand-Archive -Path ".\zig-windows.zip" -DestinationPath ".\" -Force
