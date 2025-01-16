@@ -507,6 +507,7 @@ pub fn performAction(
             .app => null,
             .surface => |v| v,
         }),
+        .toggle_maximize => self.toggleMaximize(target),
         .toggle_fullscreen => self.toggleFullscreen(target, value),
 
         .new_tab => try self.newTab(target),
@@ -707,6 +708,22 @@ fn controlInspector(
     };
 
     surface.controlInspector(mode);
+}
+
+fn toggleMaximize(_: *App, target: apprt.Target) void {
+    switch (target) {
+        .app => {},
+        .surface => |v| {
+            const window = v.rt_surface.container.window() orelse {
+                log.info(
+                    "toggleMaximize invalid for container={s}",
+                    .{@tagName(v.rt_surface.container)},
+                );
+                return;
+            };
+            window.toggleMaximize();
+        },
+    }
 }
 
 fn toggleFullscreen(
@@ -1864,7 +1881,7 @@ fn initContextMenu(self: *App) void {
         c.g_menu_append(section, "Terminal Inspector", "win.toggle_inspector");
     }
 
-    if (!self.config.@"window-decoration") {
+    if (!self.config.@"window-decoration".isCSD()) {
         const section = c.g_menu_new();
         defer c.g_object_unref(section);
         const submenu = c.g_menu_new();
