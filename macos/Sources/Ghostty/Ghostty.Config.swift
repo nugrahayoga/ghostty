@@ -339,7 +339,7 @@ extension Ghostty {
         var backgroundBlurRadius: Int {
             guard let config = self.config else { return 1 }
             var v: Int = 0
-            let key = "background-blur-radius"
+            let key = "background-blur"
             _ = ghostty_config_get(config, &v, key, UInt(key.count))
             return v;
         }
@@ -562,10 +562,11 @@ extension Ghostty.Config {
         case none
         case client
         case server
+        case auto
 
         func enabled() -> Bool {
             switch self {
-            case .client, .server: return true
+            case .client, .server, .auto: return true
             case .none: return false
             }
         }

@@ -391,7 +391,7 @@ pub const DerivedConfig = struct {
     links: link.Set,
     vsync: bool,
     colorspace: configpkg.Config.WindowColorspace,
-    blending: configpkg.Config.TextBlending,
+    blending: configpkg.Config.AlphaBlending,
 
     pub fn init(
         alloc_gpa: Allocator,
@@ -463,7 +463,7 @@ pub const DerivedConfig = struct {
             .links = links,
             .vsync = config.@"window-vsync",
             .colorspace = config.@"window-colorspace",
-            .blending = config.@"text-blending",
+            .blending = config.@"alpha-blending",
             .arena = arena,
         };
     }
@@ -667,7 +667,7 @@ pub fn init(alloc: Allocator, options: renderer.Options) !Metal {
             .cursor_wide = false,
             .use_display_p3 = options.config.colorspace == .@"display-p3",
             .use_linear_blending = options.config.blending.isLinear(),
-            .use_experimental_linear_correction = options.config.blending == .@"linear-corrected",
+            .use_linear_correction = options.config.blending == .@"linear-corrected",
         },
 
         // Fonts
@@ -1044,19 +1044,6 @@ pub fn updateFrame(
             } else {
                 self.default_foreground_color = bg;
             }
-        }
-
-        // If our terminal screen size doesn't match our expected renderer
-        // size then we skip a frame. This can happen if the terminal state
-        // is resized between when the renderer mailbox is drained and when
-        // the state mutex is acquired inside this function.
-        //
-        // For some reason this doesn't seem to cause any significant issues
-        // with flickering while resizing. '\_('-')_/'
-        if (self.cells.size.rows != state.terminal.rows or
-            self.cells.size.columns != state.terminal.cols)
-        {
-            return;
         }
 
         // Get the viewport pin so that we can compare it to the current.
@@ -2112,7 +2099,7 @@ pub fn changeConfig(self: *Metal, config: *DerivedConfig) !void {
     // Set our new color space and blending
     self.uniforms.use_display_p3 = config.colorspace == .@"display-p3";
     self.uniforms.use_linear_blending = config.blending.isLinear();
-    self.uniforms.use_experimental_linear_correction = config.blending == .@"linear-corrected";
+    self.uniforms.use_linear_correction = config.blending == .@"linear-corrected";
 
     // Set our new colors
     self.default_background_color = config.background;
@@ -2255,7 +2242,7 @@ pub fn setScreenSize(
         .cursor_wide = old.cursor_wide,
         .use_display_p3 = old.use_display_p3,
         .use_linear_blending = old.use_linear_blending,
-        .use_experimental_linear_correction = old.use_experimental_linear_correction,
+        .use_linear_correction = old.use_linear_correction,
     };
 
     // Reset our cell contents if our grid size has changed.
@@ -2437,12 +2424,22 @@ fn rebuildCells(
         }
     }
 
-    // Go row-by-row to build the cells. We go row by row because we do
-    // font shaping by row. In the future, we will also do dirty tracking
-    // by row.
+    // We rebuild the cells row-by-row because we
+    // do font shaping and dirty tracking by row.
     var row_it = screen.pages.rowIterator(.left_up, .{ .viewport = .{} }, null);
-    var y: terminal.size.CellCountInt = screen.pages.rows;
+    // If our cell contents buffer is shorter than the screen viewport,
+    // we render the rows that fit, starting from the bottom. If instead
+    // the viewport is shorter than the cell contents buffer, we align
+    // the top of the viewport with the top of the contents buffer.
+    var y: terminal.size.CellCountInt = @min(
+        screen.pages.rows,
+        self.cells.size.rows,
+    );
     while (row_it.next()) |row| {
+        // The viewport may have more rows than our cell contents,
+        // so we need to break from the loop early if we hit y = 0.
+        if (y == 0) break;
+
         y -= 1;
 
         if (!rebuild) {
@@ -2501,7 +2498,11 @@ fn rebuildCells(
         var shaper_cells: ?[]const font.shape.Cell = null;
         var shaper_cells_i: usize = 0;
 
-        const row_cells = row.cells(.all);
+        const row_cells_all = row.cells(.all);
+
+        // If our viewport is wider than our cell contents buffer,
+        // we still only process cells up to the width of the buffer.
+        const row_cells = row_cells_all[0..@min(row_cells_all.len, self.cells.size.columns)];
 
         for (row_cells, 0..) |*cell, x| {
             // If this cell falls within our preedit range then we
@@ -2671,9 +2672,8 @@ fn rebuildCells(
                     // Cells that are reversed should be fully opaque.
                     if (style.flags.inverse) break :bg_alpha default;
 
-                    // Cells that have an explicit bg color, which does not
-                    // match the current surface bg, should be fully opaque.
-                    if (bg != null and !rgb.eql(self.background_color orelse self.default_background_color)) {
+                    // Cells that have an explicit bg color should be fully opaque.
+                    if (bg_style != null) {
                         break :bg_alpha default;
                     }
 
