@@ -10,7 +10,7 @@ const gobject = @import("gobject");
 
 const Window = @import("Window.zig");
 const Tab = @import("Tab.zig");
-const adwaita = @import("adwaita.zig");
+const adw_version = @import("adw_version.zig");
 
 const log = std.log.scoped(.gtk);
 
@@ -35,7 +35,7 @@ pub fn init(self: *TabView, window: *Window) void {
     };
     self.tab_view.as(gtk.Widget).addCssClass("notebook");
 
-    if (adwaita.versionAtLeast(1, 2, 0)) {
+    if (adw_version.atLeast(1, 2, 0)) {
         // Adwaita enables all of the shortcuts by default.
         // We want to manage keybindings ourselves.
         self.tab_view.removeShortcuts(.{
@@ -115,7 +115,7 @@ pub fn gotoNthTab(self: *TabView, position: c_int) bool {
 }
 
 pub fn getTabPosition(self: *TabView, tab: *Tab) ?c_int {
-    const page = self.tab_view.getPage(@ptrCast(tab.box));
+    const page = self.tab_view.getPage(tab.box.as(gtk.Widget));
     return self.tab_view.getPagePosition(page);
 }
 
@@ -161,17 +161,17 @@ pub fn moveTab(self: *TabView, tab: *Tab, position: c_int) void {
 }
 
 pub fn reorderPage(self: *TabView, tab: *Tab, position: c_int) void {
-    const page = self.tab_view.getPage(@ptrCast(tab.box));
+    const page = self.tab_view.getPage(tab.box.as(gtk.Widget));
     _ = self.tab_view.reorderPage(page, position);
 }
 
 pub fn setTabTitle(self: *TabView, tab: *Tab, title: [:0]const u8) void {
-    const page = self.tab_view.getPage(@ptrCast(tab.box));
+    const page = self.tab_view.getPage(tab.box.as(gtk.Widget));
     page.setTitle(title.ptr);
 }
 
 pub fn setTabTooltip(self: *TabView, tab: *Tab, tooltip: [:0]const u8) void {
-    const page = self.tab_view.getPage(@ptrCast(tab.box));
+    const page = self.tab_view.getPage(tab.box.as(gtk.Widget));
     page.setTooltip(tooltip.ptr);
 }
 
@@ -186,17 +186,12 @@ fn newTabInsertPosition(self: *TabView, tab: *Tab) c_int {
 /// Adds a new tab with the given title to the notebook.
 pub fn addTab(self: *TabView, tab: *Tab, title: [:0]const u8) void {
     const position = self.newTabInsertPosition(tab);
-    const box_widget: *gtk.Widget = @ptrCast(tab.box);
-    const page = self.tab_view.insert(box_widget, position);
+    const page = self.tab_view.insert(tab.box.as(gtk.Widget), position);
     self.setTabTitle(tab, title);
     self.tab_view.setSelectedPage(page);
 }
 
 pub fn closeTab(self: *TabView, tab: *Tab) void {
-    // Save a pointer to the GTK window in case we need it later. It may be
-    // impossible to access later due to how resources are cleaned up.
-    const window: *gtk.Window = @ptrCast(@alignCast(self.window.window));
-
     // closeTab always expects to close unconditionally so we mark this
     // as true so that the close_page call below doesn't request
     // confirmation.
@@ -208,33 +203,27 @@ pub fn closeTab(self: *TabView, tab: *Tab) void {
         if (n > 1) self.forcing_close = false;
     }
 
-    const page = self.tab_view.getPage(@ptrCast(tab.box));
+    const page = self.tab_view.getPage(tab.box.as(gtk.Widget));
     self.tab_view.closePage(page);
 
     // If we have no more tabs we close the window
     if (self.nPages() == 0) {
-        // libadw versions <= 1.3.x leak the final page view
+        // libadw versions < 1.5.1 leak the final page view
         // which causes our surface to not properly cleanup. We
         // unref to force the cleanup. This will trigger a critical
         // warning from GTK, but I don't know any other workaround.
-        // Note: I'm not actually sure if 1.4.0 contains the fix,
-        // I just know that 1.3.x is broken and 1.5.1 is fixed.
-        // If we know that 1.4.0 is fixed, we can change this.
-        if (!adwaita.versionAtLeast(1, 4, 0)) {
-            const box: *gtk.Box = @ptrCast(@alignCast(tab.box));
-            box.as(gobject.Object).unref();
+        if (!adw_version.atLeast(1, 5, 1)) {
+            tab.box.unref();
         }
 
-        window.destroy();
+        self.window.close();
     }
 }
 
-pub fn createWindow(currentWindow: *Window) !*Window {
-    const alloc = currentWindow.app.core_app.alloc;
-    const app = currentWindow.app;
-
-    // Create a new window
-    return Window.create(alloc, app);
+pub fn createWindow(window: *Window) !*Window {
+    const new_window = try Window.create(window.app.core_app.alloc, window.app);
+    new_window.present();
+    return new_window;
 }
 
 fn adwPageAttached(_: *adw.TabView, page: *adw.TabPage, _: c_int, self: *TabView) callconv(.C) void {
@@ -254,6 +243,7 @@ fn adwClosePage(
     const tab: *Tab = @ptrCast(@alignCast(child.getData(Tab.GHOSTTY_TAB) orelse return 0));
     self.tab_view.closePageFinish(page, @intFromBool(self.forcing_close));
     if (!self.forcing_close) tab.closeWithConfirmation();
+
     return 1;
 }
 

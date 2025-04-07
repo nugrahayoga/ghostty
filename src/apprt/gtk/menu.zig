@@ -47,8 +47,15 @@ pub fn Menu(
             const menu_model = builder.getObject(gio.MenuModel, "menu").?;
 
             const menu_widget = gtk.PopoverMenu.newFromModelFull(menu_model, .{ .nested = true });
-            menu_widget.as(gtk.Widget).setHalign(.start);
+
+            // If this menu has an arrow, don't modify the horizontal alignment
+            // or you get visual anomalies. See PR #6087. Otherwise set the
+            // horizontal alignment to `start` so that the top left corner of
+            // the menu aligns with the point that the menu is popped up at.
+            if (!arrow) menu_widget.as(gtk.Widget).setHalign(.start);
+
             menu_widget.as(gtk.Popover).setHasArrow(@intFromBool(arrow));
+
             _ = gtk.Popover.signals.closed.connect(
                 menu_widget,
                 *Self,
@@ -85,17 +92,17 @@ pub fn Menu(
         pub fn refresh(self: *const Self) void {
             const window: *gtk.Window, const has_selection: bool = switch (T) {
                 Window => window: {
-                    const core_surface = self.parent.actionSurface() orelse break :window .{
-                        @ptrCast(@alignCast(self.parent.window)),
-                        false,
-                    };
-                    const has_selection = core_surface.hasSelection();
-                    break :window .{ @ptrCast(@alignCast(self.parent.window)), has_selection };
+                    const has_selection = if (self.parent.actionSurface()) |core_surface|
+                        core_surface.hasSelection()
+                    else
+                        false;
+
+                    break :window .{ self.parent.window.as(gtk.Window), has_selection };
                 },
                 Surface => surface: {
                     const window = self.parent.container.window() orelse return;
                     const has_selection = self.parent.core_surface.hasSelection();
-                    break :surface .{ @ptrCast(@alignCast(window.window)), has_selection };
+                    break :surface .{ window.window.as(gtk.Window), has_selection };
                 },
                 else => unreachable,
             };

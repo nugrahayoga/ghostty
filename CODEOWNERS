@@ -78,6 +78,9 @@
 #   the GTK apprt. Also includes X11/Wayland integrations and general
 #   Linux support.
 #
+# - @ghostty-org/localization/* - Anything related to localization
+#   for a specific locale.
+#
 # - @ghostty-org/macos - The Ghostty macOS app and any macOS-specific
 #   features, configurations, etc.
 #
@@ -145,11 +148,21 @@
 
 # Terminal
 /src/simd/ @ghostty-org/terminal
+/src/input/KeyEncoder.zig @ghostty-org/terminal
 /src/terminal/ @ghostty-org/terminal
 /src/terminfo/ @ghostty-org/terminal
 /src/unicode/ @ghostty-org/terminal
 /src/Surface.zig @ghostty-org/terminal
 /src/surface_mouse.zig @ghostty-org/terminal
+
+# Localization
+/po/README_TRANSLATORS.md @ghostty-org/localization
+/po/com.mitchellh.ghostty.pot @ghostty-org/localization
+/po/de_DE.UTF-8.po @ghostty-org/de_DE
+/po/nb_NO.UTF-8.po @ghostty-org/nb_NO
+/po/pl_PL.UTF-8.po @ghostty-org/pl_PL
+/po/uk_UA.UTF-8.po @ghostty-org/uk_UA
+/po/zh_CN.UTF-8.po @ghostty-org/zh_CN
 
 # Packaging - Snap
 /snap/ @ghostty-org/snap

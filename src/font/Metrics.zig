@@ -154,7 +154,7 @@ pub fn calc(face: FaceMetrics) Metrics {
     // we place it 1 underline-thickness below the baseline.
     const underline_position = @round(top_to_baseline -
         (face.underline_position orelse
-        -underline_thickness));
+            -underline_thickness));
 
     // If we don't have a provided strikethrough position
     // then we center the strikethrough stroke at half the
@@ -162,7 +162,7 @@ pub fn calc(face: FaceMetrics) Metrics {
     // case text.
     const strikethrough_position = @round(top_to_baseline -
         (face.strikethrough_position orelse
-        ex_height * 0.5 + strikethrough_thickness * 0.5));
+            ex_height * 0.5 + strikethrough_thickness * 0.5));
 
     var result: Metrics = .{
         .cell_width = @intFromFloat(cell_width),
@@ -324,7 +324,7 @@ pub const Modifier = union(enum) {
     /// Apply a modifier to a numeric value.
     pub fn apply(self: Modifier, v: anytype) @TypeOf(v) {
         const T = @TypeOf(v);
-        const signed = @typeInfo(T).Int.signedness == .signed;
+        const signed = @typeInfo(T).int.signedness == .signed;
         return switch (self) {
             .percent => |p| percent: {
                 const p_clamped: f64 = @max(0, p);
@@ -395,7 +395,7 @@ pub const Key = key: {
 
     var decls = [_]std.builtin.Type.Declaration{};
     break :key @Type(.{
-        .Enum = .{
+        .@"enum" = .{
             .tag_type = std.math.IntFittingRange(0, count - 1),
             .fields = enumFields[0..count],
             .decls = &decls,
