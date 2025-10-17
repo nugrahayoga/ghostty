@@ -9,6 +9,7 @@ const harfbuzz = @import("harfbuzz");
 const oni = @import("oniguruma");
 const crash = @import("crash/main.zig");
 const renderer = @import("renderer.zig");
+const apprt = @import("apprt.zig");
 
 /// We export the xev backend we want to use so that the rest of
 /// Ghostty can import this once and have access to the proper
@@ -29,13 +30,13 @@ pub const GlobalState = struct {
 
     gpa: ?GPA,
     alloc: std.mem.Allocator,
-    action: ?cli.Action,
+    action: ?cli.ghostty.Action,
     logging: Logging,
     rlimits: ResourceLimits = .{},
 
     /// The app resources directory, equivalent to zig-out/share when we build
     /// from source. This is null if we can't detect it.
-    resources_dir: ?[]const u8,
+    resources_dir: internal_os.ResourcesDir,
 
     /// Where logging should go
     pub const Logging = union(enum) {
@@ -62,7 +63,7 @@ pub const GlobalState = struct {
             .action = null,
             .logging = .{ .stderr = {} },
             .rlimits = .{},
-            .resources_dir = null,
+            .resources_dir = .{},
         };
         errdefer self.deinit();
 
@@ -91,7 +92,10 @@ pub const GlobalState = struct {
             unreachable;
 
         // We first try to parse any action that we may be executing.
-        self.action = try cli.Action.detectCLI(self.alloc);
+        self.action = try cli.action.detectArgs(
+            cli.ghostty.Action,
+            self.alloc,
+        );
 
         // If we have an action executing, we disable logging by default
         // since we write to stderr we don't want logs messing up our
@@ -136,10 +140,10 @@ pub const GlobalState = struct {
             std.log.info("dependency fontconfig={d}", .{fontconfig.version()});
         }
         std.log.info("renderer={}", .{renderer.Renderer});
-        std.log.info("libxev default backend={s}", .{@tagName(xev.backend)});
+        std.log.info("libxev default backend={t}", .{xev.backend});
 
         // As early as possible, initialize our resource limits.
-        self.rlimits = ResourceLimits.init();
+        self.rlimits = .init();
 
         // Initialize our crash reporting.
         crash.init(self.alloc) catch |err| {
@@ -170,11 +174,11 @@ pub const GlobalState = struct {
 
         // Find our resources directory once for the app so every launch
         // hereafter can use this cached value.
-        self.resources_dir = try internal_os.resourcesDir(self.alloc);
-        errdefer if (self.resources_dir) |dir| self.alloc.free(dir);
+        self.resources_dir = try apprt.runtime.resourcesDir(self.alloc);
+        errdefer self.resources_dir.deinit(self.alloc);
 
         // Setup i18n
-        if (self.resources_dir) |v| internal_os.i18n.init(v) catch |err| {
+        if (self.resources_dir.app()) |v| internal_os.i18n.init(v) catch |err| {
             std.log.warn("failed to init i18n, translations will not be available err={}", .{err});
         };
     }
@@ -182,7 +186,7 @@ pub const GlobalState = struct {
     /// Cleans up the global state. This doesn't _need_ to be called but
     /// doing so in dev modes will check for memory leaks.
     pub fn deinit(self: *GlobalState) void {
-        if (self.resources_dir) |dir| self.alloc.free(dir);
+        self.resources_dir.deinit(self.alloc);
 
         // Flush our crash logs
         crash.deinit();
@@ -202,7 +206,7 @@ pub const GlobalState = struct {
 
         var sa: p.Sigaction = .{
             .handler = .{ .handler = p.SIG.IGN },
-            .mask = p.empty_sigset,
+            .mask = p.sigemptyset(),
             .flags = 0,
         };
 

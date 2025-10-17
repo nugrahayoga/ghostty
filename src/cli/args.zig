@@ -7,6 +7,7 @@ const diags = @import("diagnostics.zig");
 const internal_os = @import("../os/main.zig");
 const Diagnostic = diags.Diagnostic;
 const DiagnosticList = diags.DiagnosticList;
+const CommaSplitter = @import("CommaSplitter.zig");
 
 const log = std.log.scoped(.cli);
 
@@ -40,11 +41,14 @@ pub const Error = error{
 /// "DiagnosticList" and any diagnostic messages will be added to that list.
 /// When diagnostics are present, only allocation errors will be returned.
 ///
-/// If the destination type has a decl "renamed", it must be of type
-/// std.StaticStringMap([]const u8) and contains a mapping from the old
-/// field name to the new field name. This is used to allow renaming fields
-/// while still supporting the old name. If a renamed field is set, parsing
-/// will automatically set the new field name.
+/// If the destination type has a decl "compatibility", it must be of type
+/// std.StaticStringMap(CompatibilityHandler(T)), and it will be used to
+/// handle backwards compatibility for fields with the given name. The
+/// field name doesn't need to exist (so you can setup compatibility for
+/// removed fields). The value is a function that will be called when
+/// all other parsing fails for that field. If a field changes such that
+/// the old values would NOT error, then the caller should handle that
+/// downstream after parsing is done, not through this method.
 ///
 /// Note: If the arena is already non-null, then it will be used. In this
 /// case, in the case of an error some memory might be leaked into the arena.
@@ -57,24 +61,6 @@ pub fn parse(
     const info = @typeInfo(T);
     assert(info == .@"struct");
 
-    comptime {
-        // Verify all renamed fields are valid (source does not exist,
-        // destination does exist).
-        if (@hasDecl(T, "renamed")) {
-            for (T.renamed.keys(), T.renamed.values()) |key, value| {
-                if (@hasField(T, key)) {
-                    @compileLog(key);
-                    @compileError("renamed field source exists");
-                }
-
-                if (!@hasField(T, value)) {
-                    @compileLog(value);
-                    @compileError("renamed field destination does not exist");
-                }
-            }
-        }
-    }
-
     // Make an arena for all our allocations if we support it. Otherwise,
     // use an allocator that always fails. If the arena is already set on
     // the config, then we reuse that. See memory note in parse docs.
@@ -84,7 +70,7 @@ pub fn parse(
         // If the arena is unset, we create it. We mark that we own it
         // only so that we can clean it up on error.
         if (dst._arena == null) {
-            dst._arena = ArenaAllocator.init(alloc);
+            dst._arena = .init(alloc);
             arena_owned = true;
         }
 
@@ -147,12 +133,28 @@ pub fn parse(
             break :value null;
         };
 
-        parseIntoField(T, arena_alloc, dst, key, value) catch |err| {
+        parseIntoField(T, arena_alloc, dst, key, value) catch |err| err: {
+            // If we get an error parsing a field, then we try to fall
+            // back to compatibility handlers if able.
+            if (@hasDecl(T, "compatibility")) {
+                // If we have a compatibility handler for this key, then
+                // we call it and see if it handles the error.
+                if (T.compatibility.get(key)) |handler| {
+                    if (handler(dst, arena_alloc, key, value)) {
+                        log.info(
+                            "compatibility handler for {s} handled error, you may be using a deprecated field: {}",
+                            .{ key, err },
+                        );
+                        break :err;
+                    }
+                }
+            }
+
             if (comptime !canTrackDiags(T)) return err;
 
             // The error set is dependent on comptime T, so we always add
             // an extra error so we can have the "else" below.
-            const ErrSet = @TypeOf(err) || error{ Unknown, OutOfMemory };
+            const ErrSet = @TypeOf(err) || error{ Unknown, OutOfMemory } || Error;
             const message: [:0]const u8 = switch (@as(ErrSet, @errorCast(err))) {
                 // OOM is not recoverable since we need to allocate to
                 // track more error messages.
@@ -160,10 +162,11 @@ pub fn parse(
                 error.InvalidField => "unknown field",
                 error.ValueRequired => formatValueRequired(T, arena_alloc, key) catch "value required",
                 error.InvalidValue => formatInvalidValue(T, arena_alloc, key, value) catch "invalid value",
-                else => try std.fmt.allocPrintZ(
+                else => try std.fmt.allocPrintSentinel(
                     arena_alloc,
                     "unknown error {}",
                     .{err},
+                    0,
                 ),
             };
 
@@ -177,18 +180,72 @@ pub fn parse(
     }
 }
 
+/// The function type for a compatibility handler. The compatibility
+/// handler is documented in the `parse` function documentation.
+///
+/// The function type should return bool if the compatibility was
+/// handled, and false otherwise. If false is returned then the
+/// naturally occurring error will continue to be processed as if
+/// this compatibility handler was not present.
+///
+/// Compatibility handlers aren't allowed to return errors because
+/// they're generally only called in error cases, so we already have
+/// an error message to show users. If there is an error in handling
+/// the compatibility, then the handler should return false.
+pub fn CompatibilityHandler(comptime T: type) type {
+    return *const fn (
+        dst: *T,
+        alloc: Allocator,
+        key: []const u8,
+        value: ?[]const u8,
+    ) bool;
+}
+
+/// Convenience function to create a compatibility handler that
+/// renames a field from `from` to `to`.
+pub fn compatibilityRenamed(
+    comptime T: type,
+    comptime to: []const u8,
+) CompatibilityHandler(T) {
+    comptime assert(@hasField(T, to));
+
+    return (struct {
+        fn compat(
+            dst: *T,
+            alloc: Allocator,
+            key: []const u8,
+            value: ?[]const u8,
+        ) bool {
+            _ = key;
+
+            parseIntoField(T, alloc, dst, to, value) catch |err| {
+                log.warn("error parsing renamed field {s}: {}", .{
+                    to,
+                    err,
+                });
+
+                return false;
+            };
+
+            return true;
+        }
+    }).compat;
+}
+
 fn formatValueRequired(
     comptime T: type,
     arena_alloc: std.mem.Allocator,
     key: []const u8,
-) std.mem.Allocator.Error![:0]const u8 {
-    var buf = std.ArrayList(u8).init(arena_alloc);
-    errdefer buf.deinit();
-    const writer = buf.writer();
+) std.Io.Writer.Error![:0]const u8 {
+    var stream: std.Io.Writer.Allocating = .init(arena_alloc);
+    const writer = &stream.writer;
+
     try writer.print("value required", .{});
     try formatValues(T, key, writer);
     try writer.writeByte(0);
-    return buf.items[0 .. buf.items.len - 1 :0];
+
+    const written = stream.written();
+    return written[0 .. written.len - 1 :0];
 }
 
 fn formatInvalidValue(
@@ -196,17 +253,24 @@ fn formatInvalidValue(
     arena_alloc: std.mem.Allocator,
     key: []const u8,
     value: ?[]const u8,
-) std.mem.Allocator.Error![:0]const u8 {
-    var buf = std.ArrayList(u8).init(arena_alloc);
-    errdefer buf.deinit();
-    const writer = buf.writer();
+) std.Io.Writer.Error![:0]const u8 {
+    var stream: std.Io.Writer.Allocating = .init(arena_alloc);
+    const writer = &stream.writer;
+
     try writer.print("invalid value \"{?s}\"", .{value});
     try formatValues(T, key, writer);
     try writer.writeByte(0);
-    return buf.items[0 .. buf.items.len - 1 :0];
+
+    const written = stream.written();
+    return written[0 .. written.len - 1 :0];
 }
 
-fn formatValues(comptime T: type, key: []const u8, writer: anytype) std.mem.Allocator.Error!void {
+fn formatValues(
+    comptime T: type,
+    key: []const u8,
+    writer: *std.Io.Writer,
+) std.Io.Writer.Error!void {
+    @setEvalBranchQuota(2000);
     const typeinfo = @typeInfo(T);
     inline for (typeinfo.@"struct".fields) |f| {
         if (std.mem.eql(u8, key, f.name)) {
@@ -269,7 +333,7 @@ pub fn parseIntoField(
                     return;
                 }
                 const raw = field.default_value_ptr orelse break :default;
-                const ptr: *const field.type = @alignCast(@ptrCast(raw));
+                const ptr: *const field.type = @ptrCast(@alignCast(raw));
                 @field(dst, field.name) = ptr.*;
                 return;
             }
@@ -401,20 +465,10 @@ pub fn parseIntoField(
         }
     }
 
-    // Unknown field, is the field renamed?
-    if (@hasDecl(T, "renamed")) {
-        for (T.renamed.keys(), T.renamed.values()) |old, new| {
-            if (mem.eql(u8, old, key)) {
-                try parseIntoField(T, alloc, dst, new, value);
-                return;
-            }
-        }
-    }
-
     return error.InvalidField;
 }
 
-fn parseTaggedUnion(comptime T: type, alloc: Allocator, v: []const u8) !T {
+pub fn parseTaggedUnion(comptime T: type, alloc: Allocator, v: []const u8) !T {
     const info = @typeInfo(T).@"union";
     assert(@typeInfo(info.tag_type.?) == .@"enum");
 
@@ -462,13 +516,18 @@ fn parseTaggedUnion(comptime T: type, alloc: Allocator, v: []const u8) !T {
 
 fn parseStruct(comptime T: type, alloc: Allocator, v: []const u8) !T {
     return switch (@typeInfo(T).@"struct".layout) {
-        .auto => parseAutoStruct(T, alloc, v),
+        .auto => parseAutoStruct(T, alloc, v, null),
         .@"packed" => parsePackedStruct(T, v),
         else => @compileError("unsupported struct layout"),
     };
 }
 
-pub fn parseAutoStruct(comptime T: type, alloc: Allocator, v: []const u8) !T {
+pub fn parseAutoStruct(
+    comptime T: type,
+    alloc: Allocator,
+    v: []const u8,
+    default_: ?T,
+) !T {
     const info = @typeInfo(T).@"struct";
     comptime assert(info.layout == .auto);
 
@@ -481,26 +540,32 @@ pub fn parseAutoStruct(comptime T: type, alloc: Allocator, v: []const u8) !T {
     // Keep track of which fields were set so we can error if a required
     // field was not set.
     const FieldSet = std.StaticBitSet(info.fields.len);
-    var fields_set: FieldSet = FieldSet.initEmpty();
+    var fields_set: FieldSet = .initEmpty();
 
-    // We split each value by ","
-    var iter = std.mem.splitSequence(u8, v, ",");
-    loop: while (iter.next()) |entry| {
+    // We split each value by "," allowing for quoting and escaping.
+    var iter: CommaSplitter = .init(v);
+    loop: while (try iter.next()) |entry| {
         // Find the key/value, trimming whitespace. The value may be quoted
         // which we strip the quotes from.
         const idx = mem.indexOf(u8, entry, ":") orelse return error.InvalidValue;
         const key = std.mem.trim(u8, entry[0..idx], whitespace);
+
+        // used if we need to decode a double-quoted string.
+        var buf: std.Io.Writer.Allocating = .init(alloc);
+        defer buf.deinit();
+
         const value = value: {
-            var value = std.mem.trim(u8, entry[idx + 1 ..], whitespace);
+            const value = std.mem.trim(u8, entry[idx + 1 ..], whitespace);
 
             // Detect a quoted string.
             if (value.len >= 2 and
                 value[0] == '"' and
                 value[value.len - 1] == '"')
             {
-                // Trim quotes since our CLI args processor expects
-                // quotes to already be gone.
-                value = value[1 .. value.len - 1];
+                // Decode a double-quoted string as a Zig string literal.
+                const parsed = try std.zig.string_literal.parseWrite(&buf.writer, value);
+                if (parsed == .failure) return error.InvalidValue;
+                break :value buf.written();
             }
 
             break :value value;
@@ -521,9 +586,18 @@ pub fn parseAutoStruct(comptime T: type, alloc: Allocator, v: []const u8) !T {
     // Ensure all required fields are set
     inline for (info.fields, 0..) |field, i| {
         if (!fields_set.isSet(i)) {
-            const default_ptr = field.default_value_ptr orelse return error.InvalidValue;
-            const typed_ptr: *const field.type = @alignCast(@ptrCast(default_ptr));
-            @field(result, field.name) = typed_ptr.*;
+            @field(result, field.name) = default: {
+                // If we're given a default value then we inherit those.
+                // Otherwise we use the default values as specified by the
+                // struct.
+                if (default_) |default| {
+                    break :default @field(default, field.name);
+                } else {
+                    const default_ptr = field.default_value_ptr orelse return error.InvalidValue;
+                    const typed_ptr: *const field.type = @ptrCast(@alignCast(default_ptr));
+                    break :default typed_ptr.*;
+                }
+            };
         }
     }
 
@@ -729,15 +803,13 @@ test "parse: diagnostic location" {
     } = .{};
     defer if (data._arena) |arena| arena.deinit();
 
-    var fbs = std.io.fixedBufferStream(
+    var r: std.Io.Reader = .fixed(
         \\a=42
         \\what
         \\b=two
     );
-    const r = fbs.reader();
 
-    const Iter = LineIterator(@TypeOf(r));
-    var iter: Iter = .{ .r = r, .filepath = "test" };
+    var iter: LineIterator = .{ .r = &r, .filepath = "test" };
     try parse(@TypeOf(data), testing.allocator, &data, &iter);
     try testing.expect(data._arena != null);
     try testing.expectEqualStrings("42", data.a);
@@ -750,6 +822,77 @@ test "parse: diagnostic location" {
         try testing.expectEqualStrings("test", diag.location.file.path);
         try testing.expectEqual(2, diag.location.file.line);
     }
+}
+
+test "parse: compatibility handler" {
+    const testing = std.testing;
+
+    var data: struct {
+        a: bool = false,
+        _arena: ?ArenaAllocator = null,
+
+        pub const compatibility: std.StaticStringMap(
+            CompatibilityHandler(@This()),
+        ) = .initComptime(&.{
+            .{ "a", compat },
+        });
+
+        fn compat(
+            self: *@This(),
+            alloc: Allocator,
+            key: []const u8,
+            value: ?[]const u8,
+        ) bool {
+            _ = alloc;
+            if (std.mem.eql(u8, key, "a")) {
+                if (value) |v| {
+                    if (mem.eql(u8, v, "yuh")) {
+                        self.a = true;
+                        return true;
+                    }
+                }
+            }
+
+            return false;
+        }
+    } = .{};
+    defer if (data._arena) |arena| arena.deinit();
+
+    var iter = try std.process.ArgIteratorGeneral(.{}).init(
+        testing.allocator,
+        "--a=yuh",
+    );
+    defer iter.deinit();
+    try parse(@TypeOf(data), testing.allocator, &data, &iter);
+    try testing.expect(data._arena != null);
+    try testing.expect(data.a);
+}
+
+test "parse: compatibility renamed" {
+    const testing = std.testing;
+
+    var data: struct {
+        a: bool = false,
+        b: bool = false,
+        _arena: ?ArenaAllocator = null,
+
+        pub const compatibility: std.StaticStringMap(
+            CompatibilityHandler(@This()),
+        ) = .initComptime(&.{
+            .{ "old", compatibilityRenamed(@This(), "a") },
+        });
+    } = .{};
+    defer if (data._arena) |arena| arena.deinit();
+
+    var iter = try std.process.ArgIteratorGeneral(.{}).init(
+        testing.allocator,
+        "--old=true --b=true",
+    );
+    defer iter.deinit();
+    try parse(@TypeOf(data), testing.allocator, &data, &iter);
+    try testing.expect(data._arena != null);
+    try testing.expect(data.a);
+    try testing.expect(data.b);
 }
 
 test "parseIntoField: ignore underscore-prefixed fields" {
@@ -1090,6 +1233,7 @@ test "parseIntoField: tagged union" {
             b: u8,
             c: void,
             d: []const u8,
+            e: [:0]const u8,
         } = undefined,
     } = .{};
 
@@ -1108,6 +1252,10 @@ test "parseIntoField: tagged union" {
     // Set string field
     try parseIntoField(@TypeOf(data), alloc, &data, "value", "d:hello");
     try testing.expectEqualStrings("hello", data.value.d);
+
+    // Set sentinel string field
+    try parseIntoField(@TypeOf(data), alloc, &data, "value", "e:hello");
+    try testing.expectEqualStrings("hello", data.value.e);
 }
 
 test "parseIntoField: tagged union unknown filed" {
@@ -1169,24 +1317,6 @@ test "parseIntoField: tagged union missing tag" {
         error.InvalidValue,
         parseIntoField(@TypeOf(data), alloc, &data, "value", ":a"),
     );
-}
-
-test "parseIntoField: renamed field" {
-    const testing = std.testing;
-    var arena = ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-    const alloc = arena.allocator();
-
-    var data: struct {
-        a: []const u8,
-
-        const renamed = std.StaticStringMap([]const u8).initComptime(&.{
-            .{ "old", "a" },
-        });
-    } = undefined;
-
-    try parseIntoField(@TypeOf(data), alloc, &data, "old", "42");
-    try testing.expectEqualStrings("42", data.a);
 }
 
 /// An iterator that considers its location to be CLI args. It
@@ -1260,115 +1390,119 @@ test "ArgsIterator" {
 /// Returns an iterator (implements "next") that reads CLI args by line.
 /// Each CLI arg is expected to be a single line. This is used to implement
 /// configuration files.
-pub fn LineIterator(comptime ReaderType: type) type {
-    return struct {
-        const Self = @This();
+pub const LineIterator = struct {
+    const Self = @This();
 
-        /// The maximum size a single line can be. We don't expect any
-        /// CLI arg to exceed this size. Can't wait to git blame this in
-        /// like 4 years and be wrong about this.
-        pub const MAX_LINE_SIZE = 4096;
+    /// The maximum size a single line can be. We don't expect any
+    /// CLI arg to exceed this size. Can't wait to git blame this in
+    /// like 4 years and be wrong about this.
+    pub const MAX_LINE_SIZE = 4096;
 
-        /// Our stateful reader.
-        r: ReaderType,
+    /// Our stateful reader.
+    r: *std.Io.Reader,
 
-        /// Filepath that is used for diagnostics. This is only used for
-        /// diagnostic messages so it can be formatted however you want.
-        /// It is prefixed to the messages followed by the line number.
-        filepath: []const u8 = "",
+    /// Filepath that is used for diagnostics. This is only used for
+    /// diagnostic messages so it can be formatted however you want.
+    /// It is prefixed to the messages followed by the line number.
+    filepath: []const u8 = "",
 
-        /// The current line that we're on. This is 1-indexed because
-        /// lines are generally 1-indexed in the real world. The value
-        /// can be zero if we haven't read any lines yet.
-        line: usize = 0,
+    /// The current line that we're on. This is 1-indexed because
+    /// lines are generally 1-indexed in the real world. The value
+    /// can be zero if we haven't read any lines yet.
+    line: usize = 0,
 
-        /// This is the buffer where we store the current entry that
-        /// is formatted to be compatible with the parse function.
-        entry: [MAX_LINE_SIZE]u8 = [_]u8{ '-', '-' } ++ ([_]u8{0} ** (MAX_LINE_SIZE - 2)),
+    /// This is the buffer where we store the current entry that
+    /// is formatted to be compatible with the parse function.
+    entry: [MAX_LINE_SIZE]u8 = [_]u8{ '-', '-' } ++ ([_]u8{0} ** (MAX_LINE_SIZE - 2)),
 
-        pub fn next(self: *Self) ?[]const u8 {
-            // TODO: detect "--" prefixed lines and give a friendlier error
-            const buf = buf: {
-                while (true) {
-                    // Read the full line
-                    var entry = self.r.readUntilDelimiterOrEof(self.entry[2..], '\n') catch |err| switch (err) {
-                        inline else => |e| {
-                            log.warn("cannot read from \"{s}\": {}", .{ self.filepath, e });
-                            return null;
-                        },
-                    } orelse return null;
+    pub fn init(reader: *std.Io.Reader) Self {
+        return .{ .r = reader };
+    }
 
-                    // Increment our line counter
-                    self.line += 1;
+    pub fn next(self: *Self) ?[]const u8 {
+        // First prime the reader.
+        // File readers at least are initialized with a size of 0,
+        // and this will actually prompt the reader to get the actual
+        // size of the file, which will be used in the EOF check below.
+        //
+        // This will also optimize reads down the line as we're
+        // more likely to beworking with buffered data.
+        self.r.fillMore() catch {};
 
-                    // Trim any whitespace (including CR) around it
-                    const trim = std.mem.trim(u8, entry, whitespace ++ "\r");
-                    if (trim.len != entry.len) {
-                        std.mem.copyForwards(u8, entry, trim);
-                        entry = entry[0..trim.len];
-                    }
+        var writer: std.Io.Writer = .fixed(self.entry[2..]);
 
-                    // Ignore blank lines and comments
-                    if (entry.len == 0 or entry[0] == '#') continue;
+        var entry = while (self.r.seek != self.r.end) {
+            // Reset write head
+            writer.end = 0;
 
-                    // Trim spaces around '='
-                    if (mem.indexOf(u8, entry, "=")) |idx| {
-                        const key = std.mem.trim(u8, entry[0..idx], whitespace);
-                        const value = value: {
-                            var value = std.mem.trim(u8, entry[idx + 1 ..], whitespace);
+            _ = self.r.streamDelimiterEnding(&writer, '\n') catch |e| {
+                log.warn("cannot read from \"{s}\": {}", .{ self.filepath, e });
+                return null;
+            };
+            _ = self.r.discardDelimiterInclusive('\n') catch {};
 
-                            // Detect a quoted string.
-                            if (value.len >= 2 and
-                                value[0] == '"' and
-                                value[value.len - 1] == '"')
-                            {
-                                // Trim quotes since our CLI args processor expects
-                                // quotes to already be gone.
-                                value = value[1 .. value.len - 1];
-                            }
+            var entry = writer.buffered();
+            self.line += 1;
 
-                            break :value value;
-                        };
+            // Trim any whitespace (including CR) around it
+            const trim = std.mem.trim(u8, entry, whitespace ++ "\r");
+            if (trim.len != entry.len) {
+                std.mem.copyForwards(u8, entry, trim);
+                entry = entry[0..trim.len];
+            }
 
-                        const len = key.len + value.len + 1;
-                        if (entry.len != len) {
-                            std.mem.copyForwards(u8, entry, key);
-                            entry[key.len] = '=';
-                            std.mem.copyForwards(u8, entry[key.len + 1 ..], value);
-                            entry = entry[0..len];
-                        }
-                    }
+            // Ignore blank lines and comments
+            if (entry.len == 0 or entry[0] == '#') continue;
+            break entry;
+        } else return null;
 
-                    break :buf entry;
+        if (mem.indexOf(u8, entry, "=")) |idx| {
+            const key = std.mem.trim(u8, entry[0..idx], whitespace);
+            const value = value: {
+                var value = std.mem.trim(u8, entry[idx + 1 ..], whitespace);
+
+                // Detect a quoted string.
+                if (value.len >= 2 and
+                    value[0] == '"' and
+                    value[value.len - 1] == '"')
+                {
+                    // Trim quotes since our CLI args processor expects
+                    // quotes to already be gone.
+                    value = value[1 .. value.len - 1];
                 }
+
+                break :value value;
             };
 
-            // We need to reslice so that we include our '--' at the beginning
-            // of our buffer so that we can trick the CLI parser to treat it
-            // as CLI args.
-            return self.entry[0 .. buf.len + 2];
+            const len = key.len + value.len + 1;
+            if (entry.len != len) {
+                std.mem.copyForwards(u8, entry, key);
+                entry[key.len] = '=';
+                std.mem.copyForwards(u8, entry[key.len + 1 ..], value);
+                entry = entry[0..len];
+            }
         }
 
-        /// Returns a location for a diagnostic message.
-        pub fn location(
-            self: *const Self,
-            alloc: Allocator,
-        ) Allocator.Error!?diags.Location {
-            // If we have no filepath then we have no location.
-            if (self.filepath.len == 0) return null;
+        // We need to reslice so that we include our '--' at the beginning
+        // of our buffer so that we can trick the CLI parser to treat it
+        // as CLI args.
+        return self.entry[0 .. entry.len + 2];
+    }
 
-            return .{ .file = .{
-                .path = try alloc.dupe(u8, self.filepath),
-                .line = self.line,
-            } };
-        }
-    };
-}
+    /// Returns a location for a diagnostic message.
+    pub fn location(
+        self: *const Self,
+        alloc: Allocator,
+    ) Allocator.Error!?diags.Location {
+        // If we have no filepath then we have no location.
+        if (self.filepath.len == 0) return null;
 
-// Constructs a LineIterator (see docs for that).
-fn lineIterator(reader: anytype) LineIterator(@TypeOf(reader)) {
-    return .{ .r = reader };
-}
+        return .{ .file = .{
+            .path = try alloc.dupe(u8, self.filepath),
+            .line = self.line,
+        } };
+    }
+};
 
 /// An iterator valid for arg parsing from a slice.
 pub const SliceIterator = struct {
@@ -1391,7 +1525,7 @@ pub fn sliceIterator(slice: []const []const u8) SliceIterator {
 
 test "LineIterator" {
     const testing = std.testing;
-    var fbs = std.io.fixedBufferStream(
+    var reader: std.Io.Reader = .fixed(
         \\A
         \\B=42
         \\C
@@ -1406,7 +1540,7 @@ test "LineIterator" {
         \\F=  "value "
     );
 
-    var iter = lineIterator(fbs.reader());
+    var iter: LineIterator = .init(&reader);
     try testing.expectEqualStrings("--A", iter.next().?);
     try testing.expectEqualStrings("--B=42", iter.next().?);
     try testing.expectEqualStrings("--C", iter.next().?);
@@ -1419,9 +1553,9 @@ test "LineIterator" {
 
 test "LineIterator end in newline" {
     const testing = std.testing;
-    var fbs = std.io.fixedBufferStream("A\n\n");
+    var reader: std.Io.Reader = .fixed("A\n\n");
 
-    var iter = lineIterator(fbs.reader());
+    var iter: LineIterator = .init(&reader);
     try testing.expectEqualStrings("--A", iter.next().?);
     try testing.expectEqual(@as(?[]const u8, null), iter.next());
     try testing.expectEqual(@as(?[]const u8, null), iter.next());
@@ -1429,9 +1563,9 @@ test "LineIterator end in newline" {
 
 test "LineIterator spaces around '='" {
     const testing = std.testing;
-    var fbs = std.io.fixedBufferStream("A = B\n\n");
+    var reader: std.Io.Reader = .fixed("A = B\n\n");
 
-    var iter = lineIterator(fbs.reader());
+    var iter: LineIterator = .init(&reader);
     try testing.expectEqualStrings("--A=B", iter.next().?);
     try testing.expectEqual(@as(?[]const u8, null), iter.next());
     try testing.expectEqual(@as(?[]const u8, null), iter.next());
@@ -1439,18 +1573,18 @@ test "LineIterator spaces around '='" {
 
 test "LineIterator no value" {
     const testing = std.testing;
-    var fbs = std.io.fixedBufferStream("A = \n\n");
+    var reader: std.Io.Reader = .fixed("A = \n\n");
 
-    var iter = lineIterator(fbs.reader());
+    var iter: LineIterator = .init(&reader);
     try testing.expectEqualStrings("--A=", iter.next().?);
     try testing.expectEqual(@as(?[]const u8, null), iter.next());
 }
 
 test "LineIterator with CRLF line endings" {
     const testing = std.testing;
-    var fbs = std.io.fixedBufferStream("A\r\nB = C\r\n");
+    var reader: std.Io.Reader = .fixed("A\r\nB = C\r\n");
 
-    var iter = lineIterator(fbs.reader());
+    var iter: LineIterator = .init(&reader);
     try testing.expectEqualStrings("--A", iter.next().?);
     try testing.expectEqualStrings("--B=C", iter.next().?);
     try testing.expectEqual(@as(?[]const u8, null), iter.next());

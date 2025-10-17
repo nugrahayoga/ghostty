@@ -44,7 +44,7 @@ const masks = blk: {
 cols: usize = 0,
 
 /// Preallocated tab stops.
-prealloc_stops: [prealloc_count]Unit = [1]Unit{0} ** prealloc_count,
+prealloc_stops: [prealloc_count]Unit = @splat(0),
 
 /// Dynamically expanded stops above prealloc stops.
 dynamic_stops: []Unit = &[0]Unit{},
@@ -129,6 +129,7 @@ pub fn resize(self: *Tabstops, alloc: Allocator, cols: usize) !void {
 
     // Note: we can probably try to realloc here but I'm not sure it matters.
     const new = try alloc.alloc(Unit, size);
+    @memset(new, 0);
     if (self.dynamic_stops.len > 0) {
         fastmem.copy(Unit, new, self.dynamic_stops);
         alloc.free(self.dynamic_stops);

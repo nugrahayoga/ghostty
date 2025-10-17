@@ -6,14 +6,12 @@ extension Ghostty {
     /// Render a terminal for the active app in the environment.
     struct Terminal: View {
         @EnvironmentObject private var ghostty: Ghostty.App
-        @FocusedValue(\.ghosttySurfaceTitle) private var surfaceTitle: String?
 
         var body: some View {
             if let app = self.ghostty.app {
                 SurfaceForApp(app) { surfaceView in
                     SurfaceWrapper(surfaceView: surfaceView)
                 }
-                .navigationTitle(surfaceTitle ?? "Ghostty")
             }
         }
     }
@@ -72,9 +70,8 @@ extension Ghostty {
                     let pubResign = center.publisher(for: NSWindow.didResignKeyNotification)
                     #endif
 
-                    Surface(view: surfaceView, size: geo.size)
+                    SurfaceRepresentable(view: surfaceView, size: geo.size)
                         .focused($surfaceFocus)
-                        .focusedValue(\.ghosttySurfaceTitle, surfaceView.title)
                         .focusedValue(\.ghosttySurfacePwd, surfaceView.pwd)
                         .focusedValue(\.ghosttySurfaceView, surfaceView)
                         .focusedValue(\.ghosttySurfaceCellSize, surfaceView.cellSize)
@@ -107,7 +104,18 @@ extension Ghostty {
                     }
                 }
                 .ghosttySurfaceView(surfaceView)
-
+                
+                // Progress report
+                if let progressReport = surfaceView.progressReport, progressReport.state != .remove {
+                    VStack(spacing: 0) {
+                        SurfaceProgressBar(report: progressReport)
+                        Spacer()
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                    .allowsHitTesting(false)
+                    .transition(.opacity)
+                }
+                
 #if canImport(AppKit)
                 // If we are in the middle of a key sequence, then we show a visual element. We only
                 // support this on macOS currently although in theory we can support mobile with keyboards!
@@ -190,6 +198,11 @@ extension Ghostty {
                     SecureInputOverlay()
                 }
                 #endif
+                
+                // Show bell border if enabled
+                if (ghostty.config.bellFeatures.contains(.border)) {
+                    BellBorderOverlay(bell: surfaceView.bell)
+                }
 
                 // If our surface is not healthy, then we render an error view over it.
                 if (!surfaceView.healthy) {
@@ -261,6 +274,8 @@ extension Ghostty {
         }
     }
 
+
+
     // This is the resize overlay that shows on top of a surface to show the current
     // size during a resize operation.
     struct SurfaceResizeOverlay: View {
@@ -295,8 +310,12 @@ extension Ghostty {
             if let instant = focusInstant {
                 let d = instant.duration(to: ContinuousClock.now)
                 if (d < .milliseconds(500)) {
-                    // Avoid this size completely.
-                    lastSize = geoSize
+                    // Avoid this size completely. We can't set values during
+                    // view updates so we have to defer this to another tick.
+                    DispatchQueue.main.async {
+                        lastSize = geoSize
+                    }
+
                     return true;
                 }
             }
@@ -320,7 +339,7 @@ extension Ghostty {
                         Spacer()
                     }
 
-                    Text(verbatim: "\(size.columns)c ⨯ \(size.rows)r")
+                    Text(verbatim: "\(size.columns) ⨯ \(size.rows)")
                         .padding(.init(top: padding, leading: padding, bottom: padding, trailing: padding))
                         .background(
                             RoundedRectangle(cornerRadius: 4)
@@ -367,11 +386,7 @@ extension Ghostty {
     /// A surface is terminology in Ghostty for a terminal surface, or a place where a terminal is actually drawn
     /// and interacted with. The word "surface" is used because a surface may represent a window, a tab,
     /// a split, a small preview pane, etc. It is ANYTHING that has a terminal drawn to it.
-    ///
-    /// We just wrap an AppKit NSView here at the moment so that we can behave as low level as possible
-    /// since that is what the Metal renderer in Ghostty expects. In the future, it may make more sense to
-    /// wrap an MTKView and use that, but for legacy reasons we didn't do that to begin with.
-    struct Surface: OSViewRepresentable {
+    struct SurfaceRepresentable: OSViewRepresentable {
         /// The view to render for the terminal surface.
         let view: SurfaceView
 
@@ -385,16 +400,26 @@ extension Ghostty {
         /// The best approach is to wrap this view in a GeometryReader and pass in the geo.size.
         let size: CGSize
 
+        #if canImport(AppKit)
+        func makeOSView(context: Context) -> SurfaceScrollView {
+            // On macOS, wrap the surface view in a scroll view
+            return SurfaceScrollView(contentSize: size, surfaceView: view)
+        }
+
+        func updateOSView(_ scrollView: SurfaceScrollView, context: Context) {
+            // Our scrollview always takes up the full size.
+            scrollView.frame.size = size
+        }
+        #else
         func makeOSView(context: Context) -> SurfaceView {
-            // We need the view as part of the state to be created previously because
-            // the view is sent to the Ghostty API so that it can manipulate it
-            // directly since we draw on a render thread.
-            return view;
+            // On iOS, return the surface view directly
+            return view
         }
 
         func updateOSView(_ view: SurfaceView, context: Context) {
             view.sizeDidChange(size)
         }
+        #endif
     }
 
     /// The configuration for a surface. For any configuration not set, defaults will be chosen from
@@ -408,28 +433,51 @@ extension Ghostty {
 
         /// Explicit command to set
         var command: String? = nil
+        
+        /// Environment variables to set for the terminal
+        var environmentVariables: [String: String] = [:]
+
+        /// Extra input to send as stdin
+        var initialInput: String? = nil
+        
+        /// Wait after the command
+        var waitAfterCommand: Bool = false
 
         init() {}
 
         init(from config: ghostty_surface_config_s) {
             self.fontSize = config.font_size
-            self.workingDirectory = String.init(cString: config.working_directory, encoding: .utf8)
-            self.command = String.init(cString: config.command, encoding: .utf8)
+            if let workingDirectory = config.working_directory {
+                self.workingDirectory = String.init(cString: workingDirectory, encoding: .utf8)
+            }
+            if let command = config.command {
+                self.command = String.init(cString: command, encoding: .utf8)
+            }
+
+            // Convert the C env vars to Swift dictionary
+            if config.env_var_count > 0, let envVars = config.env_vars {
+                for i in 0..<config.env_var_count {
+                    let envVar = envVars[i]
+                    if let key = String(cString: envVar.key, encoding: .utf8),
+                       let value = String(cString: envVar.value, encoding: .utf8) {
+                        self.environmentVariables[key] = value
+                    }
+                }
+            }
         }
 
-        /// Returns the ghostty configuration for this surface configuration struct. The memory
-        /// in the returned struct is only valid as long as this struct is retained.
-        func ghosttyConfig(view: SurfaceView) -> ghostty_surface_config_s {
+        /// Provides a C-compatible ghostty configuration within a closure. The configuration
+        /// and all its string pointers are only valid within the closure.
+        func withCValue<T>(view: SurfaceView, _ body: (inout ghostty_surface_config_s) throws -> T) rethrows -> T {
             var config = ghostty_surface_config_new()
             config.userdata = Unmanaged.passUnretained(view).toOpaque()
-            #if os(macOS)
+#if os(macOS)
             config.platform_tag = GHOSTTY_PLATFORM_MACOS
             config.platform = ghostty_platform_u(macos: ghostty_platform_macos_s(
                 nsview: Unmanaged.passUnretained(view).toOpaque()
             ))
             config.scale_factor = NSScreen.main!.backingScaleFactor
-
-            #elseif os(iOS)
+#elseif os(iOS)
             config.platform_tag = GHOSTTY_PLATFORM_IOS
             config.platform = ghostty_platform_u(ios: ghostty_platform_ios_s(
                 uiview: Unmanaged.passUnretained(view).toOpaque()
@@ -439,21 +487,127 @@ extension Ghostty {
             // probably set this to some default, then modify the scale factor through
             // libghostty APIs when a UIView is attached to a window/scene. TODO.
             config.scale_factor = UIScreen.main.scale
-            #else
-            #error("unsupported target")
-            #endif
+#else
+#error("unsupported target")
+#endif
 
-            if let fontSize = fontSize { config.font_size = fontSize }
-            if let workingDirectory = workingDirectory {
-                config.working_directory = (workingDirectory as NSString).utf8String
-            }
-            if let command = command {
-                config.command = (command as NSString).utf8String
-            }
+            // Zero is our default value that means to inherit the font size.
+            config.font_size = fontSize ?? 0
+            
+            // Set wait after command
+            config.wait_after_command = waitAfterCommand
 
-            return config
+            // Use withCString to ensure strings remain valid for the duration of the closure
+            return try workingDirectory.withCString { cWorkingDir in
+                config.working_directory = cWorkingDir
+
+                return try command.withCString { cCommand in
+                    config.command = cCommand
+
+                    return try initialInput.withCString { cInput in
+                        config.initial_input = cInput
+
+                        // Convert dictionary to arrays for easier processing
+                        let keys = Array(environmentVariables.keys)
+                        let values = Array(environmentVariables.values)
+
+                        // Create C strings for all keys and values
+                        return try keys.withCStrings { keyCStrings in
+                            return try values.withCStrings { valueCStrings in
+                                // Create array of ghostty_env_var_s
+                                var envVars = Array<ghostty_env_var_s>()
+                                envVars.reserveCapacity(environmentVariables.count)
+                                for i in 0..<environmentVariables.count {
+                                    envVars.append(ghostty_env_var_s(
+                                        key: keyCStrings[i],
+                                        value: valueCStrings[i]
+                                    ))
+                                }
+
+                                return try envVars.withUnsafeMutableBufferPointer { buffer in
+                                    config.env_vars = buffer.baseAddress
+                                    config.env_var_count = environmentVariables.count
+                                    return try body(&config)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
+
+    /// Visual overlay that shows a border around the edges when the bell rings with border feature enabled.
+    struct BellBorderOverlay: View {
+        let bell: Bool
+        
+        var body: some View {
+            Rectangle()
+                .strokeBorder(
+                    Color(red: 1.0, green: 0.8, blue: 0.0).opacity(0.5),
+                    lineWidth: 3
+                )
+                .allowsHitTesting(false)
+                .opacity(bell ? 1.0 : 0.0)
+                .animation(.easeInOut(duration: 0.3), value: bell)
+        }
+    }
+
+    #if canImport(AppKit)
+    /// When changing the split state, or going full screen (native or non), the terminal view
+    /// will lose focus. There has to be some nice SwiftUI-native way to fix this but I can't
+    /// figure it out so we're going to do this hacky thing to bring focus back to the terminal
+    /// that should have it.
+    static func moveFocus(
+        to: SurfaceView,
+        from: SurfaceView? = nil,
+        delay: TimeInterval? = nil
+    ) {
+        // The whole delay machinery is a bit of a hack to work around a
+        // situation where the window is destroyed and the surface view
+        // will never be attached to a window. Realistically, we should
+        // handle this upstream but we also don't want this function to be
+        // a source of infinite loops.
+
+        // Our max delay before we give up
+        let maxDelay: TimeInterval = 0.5
+        guard (delay ?? 0) < maxDelay else { return }
+
+        // We start at a 50 millisecond delay and do a doubling backoff
+        let nextDelay: TimeInterval = if let delay {
+            delay * 2
+        } else {
+            // 100 milliseconds
+            0.05
+        }
+
+        let work: DispatchWorkItem = .init {
+            // If the callback runs before the surface is attached to a view
+            // then the window will be nil. We just reschedule in that case.
+            guard let window = to.window else {
+                moveFocus(to: to, from: from, delay: nextDelay)
+                return
+            }
+
+            // If we had a previously focused node and its not where we're sending
+            // focus, make sure that we explicitly tell it to lose focus. In theory
+            // we should NOT have to do this but the focus callback isn't getting
+            // called for some reason.
+            if let from = from {
+                _ = from.resignFirstResponder()
+            }
+
+            window.makeFirstResponder(to)
+        }
+
+        let queue = DispatchQueue.main
+        if let delay {
+            queue.asyncAfter(deadline: .now() + delay, execute: work)
+        } else {
+            queue.async(execute: work)
+        }
+    }
+    #endif
 }
 
 // MARK: Surface Environment Keys
@@ -487,15 +641,6 @@ extension FocusedValues {
         typealias Value = Ghostty.SurfaceView
     }
 
-    var ghosttySurfaceTitle: String? {
-        get { self[FocusedGhosttySurfaceTitle.self] }
-        set { self[FocusedGhosttySurfaceTitle.self] = newValue }
-    }
-
-    struct FocusedGhosttySurfaceTitle: FocusedValueKey {
-        typealias Value = String
-    }
-
     var ghosttySurfacePwd: String? {
         get { self[FocusedGhosttySurfacePwd.self] }
         set { self[FocusedGhosttySurfacePwd.self] = newValue }
@@ -503,15 +648,6 @@ extension FocusedValues {
 
     struct FocusedGhosttySurfacePwd: FocusedValueKey {
         typealias Value = String
-    }
-
-    var ghosttySurfaceZoomed: Bool? {
-        get { self[FocusedGhosttySurfaceZoomed.self] }
-        set { self[FocusedGhosttySurfaceZoomed.self] = newValue }
-    }
-
-    struct FocusedGhosttySurfaceZoomed: FocusedValueKey {
-        typealias Value = Bool
     }
 
     var ghosttySurfaceCellSize: OSSize? {

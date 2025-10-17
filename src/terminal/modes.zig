@@ -43,7 +43,7 @@ pub const ModeState = struct {
     }
 
     /// Get the value of a mode.
-    pub fn get(self: *ModeState, mode: Mode) bool {
+    pub fn get(self: *const ModeState, mode: Mode) bool {
         switch (mode) {
             inline else => |mode_comptime| {
                 const entry = comptime entryForMode(mode_comptime);
@@ -206,6 +206,7 @@ const entries: []const ModeEntry = &.{
     .{ .name = "cursor_visible", .value = 25, .default = true },
     .{ .name = "enable_mode_3", .value = 40 },
     .{ .name = "reverse_wrap", .value = 45 },
+    .{ .name = "alt_screen_legacy", .value = 47 },
     .{ .name = "keypad_keys", .value = 66 },
     .{ .name = "enable_left_and_right_margin", .value = 69 },
     .{ .name = "mouse_event_normal", .value = 1000 },
@@ -222,6 +223,7 @@ const entries: []const ModeEntry = &.{
     .{ .name = "alt_sends_escape", .value = 1039 },
     .{ .name = "reverse_wrap_extended", .value = 1045 },
     .{ .name = "alt_screen", .value = 1047 },
+    .{ .name = "save_cursor", .value = 1048 },
     .{ .name = "alt_screen_save_cursor_clear_enter", .value = 1049 },
     .{ .name = "bracketed_paste", .value = 2004 },
     .{ .name = "synchronized_output", .value = 2026 },

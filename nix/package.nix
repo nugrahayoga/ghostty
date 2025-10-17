@@ -10,7 +10,7 @@
   git,
   ncurses,
   pkg-config,
-  zig_0_14,
+  zig_0_15,
   pandoc,
   revision ? "dirty",
   optimize ? "Debug",
@@ -27,7 +27,7 @@
   # https://github.com/ziglang/zig/issues/14281#issuecomment-1624220653 is
   # ultimately acted on and has made its way to a nixpkgs implementation, this
   # can probably be removed in favor of that.
-  zig_hook = zig_0_14.hook.overrideAttrs {
+  zig_hook = zig_0_15.hook.overrideAttrs {
     zig_default_flags = "-Dcpu=baseline -Doptimize=${optimize} --color off";
   };
   gi_typelib_path = import ./build-support/gi-typelib-path.nix {
@@ -36,10 +36,11 @@
   buildInputs = import ./build-support/build-inputs.nix {
     inherit pkgs lib stdenv enableX11 enableWayland;
   };
+  strip = optimize != "Debug" && optimize != "ReleaseSafe";
 in
   stdenv.mkDerivation (finalAttrs: {
     pname = "ghostty";
-    version = "1.1.4";
+    version = "1.3.0-dev";
 
     # We limit source like this to try and reduce the amount of rebuilds as possible
     # thus we only provide the source that is needed for the build
@@ -87,6 +88,7 @@ in
     buildInputs = buildInputs;
 
     dontConfigure = true;
+    dontStrip = !strip;
 
     GI_TYPELIB_PATH = gi_typelib_path;
 
@@ -96,6 +98,7 @@ in
       "-Dversion-string=${finalAttrs.version}-${revision}-nix"
       "-Dgtk-x11=${lib.boolToString enableX11}"
       "-Dgtk-wayland=${lib.boolToString enableWayland}"
+      "-Dstrip=${lib.boolToString strip}"
     ];
 
     outputs = [
@@ -127,6 +130,10 @@ in
       mv $out/share/vim/vimfiles "$vim"
       ln -sf "$vim" "$out/share/vim/vimfiles"
       echo "$vim" >> "$out/nix-support/propagated-user-env-packages"
+
+      echo "gst_all_1.gstreamer" >> "$out/nix-support/propagated-user-env-packages"
+      echo "gst_all_1.gst-plugins-base" >> "$out/nix-support/propagated-user-env-packages"
+      echo "gst_all_1.gst-plugins-good" >> "$out/nix-support/propagated-user-env-packages"
     '';
 
     meta = {

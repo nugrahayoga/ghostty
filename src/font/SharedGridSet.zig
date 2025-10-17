@@ -50,7 +50,7 @@ pub const InitError = Library.InitError;
 
 /// Initialize a new SharedGridSet.
 pub fn init(alloc: Allocator) InitError!SharedGridSet {
-    var font_lib = try Library.init();
+    var font_lib = try Library.init(alloc);
     errdefer font_lib.deinit();
 
     return .{
@@ -126,7 +126,7 @@ pub fn ref(
         .ref = 1,
     };
 
-    grid.* = try SharedGrid.init(self.alloc, resolver: {
+    grid.* = try .init(self.alloc, resolver: {
         // Build our collection. This is the expensive operation that
         // involves finding fonts, loading them (maybe, some are deferred),
         // etc.
@@ -200,11 +200,12 @@ fn collection(
                             try face.name(&name_buf),
                         });
 
-                        _ = try c.add(
-                            self.alloc,
-                            style,
-                            .{ .deferred = face },
-                        );
+                        _ = try c.addDeferred(self.alloc, face, .{
+                            .style = style,
+                            .fallback = false,
+                            // No size adjustment for primary fonts.
+                            .size_adjustment = .none,
+                        });
 
                         continue;
                     }
@@ -230,11 +231,12 @@ fn collection(
                             try face.name(&name_buf),
                         });
 
-                        _ = try c.add(
-                            self.alloc,
-                            style,
-                            .{ .deferred = face },
-                        );
+                        _ = try c.addDeferred(self.alloc, face, .{
+                            .style = style,
+                            .fallback = false,
+                            // No size adjustment for primary fonts.
+                            .size_adjustment = .none,
+                        });
 
                         continue;
                     }
@@ -257,39 +259,77 @@ fn collection(
     // Our built-in font will be used as a backup
     _ = try c.add(
         self.alloc,
-        .regular,
-        .{ .fallback_loaded = try Face.init(
+        try .init(
             self.font_lib,
-            font.embedded.regular,
+            font.embedded.variable,
             load_options.faceOptions(),
-        ) },
+        ),
+        .{
+            .style = .regular,
+            .fallback = true,
+            .size_adjustment = font.default_fallback_adjustment,
+        },
+    );
+    try (try c.getFace(try c.add(
+        self.alloc,
+        try .init(
+            self.font_lib,
+            font.embedded.variable,
+            load_options.faceOptions(),
+        ),
+        .{
+            .style = .bold,
+            .fallback = true,
+            .size_adjustment = font.default_fallback_adjustment,
+        },
+    ))).setVariations(
+        &.{.{ .id = .init("wght"), .value = 700 }},
+        load_options.faceOptions(),
     );
     _ = try c.add(
         self.alloc,
-        .bold,
-        .{ .fallback_loaded = try Face.init(
+        try .init(
             self.font_lib,
-            font.embedded.bold,
+            font.embedded.variable_italic,
             load_options.faceOptions(),
-        ) },
+        ),
+        .{
+            .style = .italic,
+            .fallback = true,
+            .size_adjustment = font.default_fallback_adjustment,
+        },
     );
+    try (try c.getFace(try c.add(
+        self.alloc,
+        try .init(
+            self.font_lib,
+            font.embedded.variable_italic,
+            load_options.faceOptions(),
+        ),
+        .{
+            .style = .bold_italic,
+            .fallback = true,
+            .size_adjustment = font.default_fallback_adjustment,
+        },
+    ))).setVariations(
+        &.{.{ .id = .init("wght"), .value = 700 }},
+        load_options.faceOptions(),
+    );
+
+    // Nerd-font symbols fallback.
     _ = try c.add(
         self.alloc,
-        .italic,
-        .{ .fallback_loaded = try Face.init(
+        try .init(
             self.font_lib,
-            font.embedded.italic,
+            font.embedded.symbols_nerd_font,
             load_options.faceOptions(),
-        ) },
-    );
-    _ = try c.add(
-        self.alloc,
-        .bold_italic,
-        .{ .fallback_loaded = try Face.init(
-            self.font_lib,
-            font.embedded.bold_italic,
-            load_options.faceOptions(),
-        ) },
+        ),
+        .{
+            .style = .regular,
+            .fallback = true,
+            // No size adjustment for the symbols font.
+            .size_adjustment = .none,
+        },
     );
 
     // On macOS, always search for and add the Apple Emoji font
@@ -304,11 +344,12 @@ fn collection(
         });
         defer disco_it.deinit();
         if (try disco_it.next()) |face| {
-            _ = try c.add(
-                self.alloc,
-                .regular,
-                .{ .fallback_deferred = face },
-            );
+            _ = try c.addDeferred(self.alloc, face, .{
+                .style = .regular,
+                .fallback = true,
+                // No size adjustment for emojis.
+                .size_adjustment = .none,
+            });
         }
     }
 
@@ -317,21 +358,31 @@ fn collection(
     if (comptime !builtin.target.os.tag.isDarwin() or Discover == void) {
         _ = try c.add(
             self.alloc,
-            .regular,
-            .{ .fallback_loaded = try Face.init(
+            try .init(
                 self.font_lib,
                 font.embedded.emoji,
                 load_options.faceOptions(),
-            ) },
+            ),
+            .{
+                .style = .regular,
+                .fallback = true,
+                // No size adjustment for emojis.
+                .size_adjustment = .none,
+            },
         );
         _ = try c.add(
             self.alloc,
-            .regular,
-            .{ .fallback_loaded = try Face.init(
+            try .init(
                 self.font_lib,
                 font.embedded.emoji_text,
                 load_options.faceOptions(),
-            ) },
+            ),
+            .{
+                .style = .regular,
+                .fallback = true,
+                // No size adjustment for emojis.
+                .size_adjustment = .none,
+            },
         );
     }
 
@@ -391,7 +442,7 @@ fn discover(self: *SharedGridSet) !?*Discover {
     // If we initialized, use it
     if (self.font_discover) |*v| return v;
 
-    self.font_discover = Discover.init();
+    self.font_discover = .init();
     return &self.font_discover.?;
 }
 
@@ -432,6 +483,7 @@ pub const DerivedConfig = struct {
     @"adjust-cursor-thickness": ?Metrics.Modifier,
     @"adjust-cursor-height": ?Metrics.Modifier,
     @"adjust-box-thickness": ?Metrics.Modifier,
+    @"adjust-icon-height": ?Metrics.Modifier,
     @"freetype-load-flags": font.face.FreetypeLoadFlags,
 
     /// Initialize a DerivedConfig. The config should be either a
@@ -471,6 +523,7 @@ pub const DerivedConfig = struct {
             .@"adjust-cursor-thickness" = config.@"adjust-cursor-thickness",
             .@"adjust-cursor-height" = config.@"adjust-cursor-height",
             .@"adjust-box-thickness" = config.@"adjust-box-thickness",
+            .@"adjust-icon-height" = config.@"adjust-icon-height",
             .@"freetype-load-flags" = if (font.face.FreetypeLoadFlags != void) config.@"freetype-load-flags" else {},
 
             // This must be last so the arena contains all our allocations
@@ -498,7 +551,7 @@ pub const Key = struct {
     /// each style. For example, bold is from
     /// offsets[@intFromEnum(.bold) - 1] to
     /// offsets[@intFromEnum(.bold)].
-    style_offsets: StyleOffsets = .{0} ** style_offsets_len,
+    style_offsets: StyleOffsets = @splat(0),
 
     /// The codepoint map configuration.
     codepoint_map: CodepointMap = .{},
@@ -543,10 +596,10 @@ pub const Key = struct {
         // from DerivedConfig below.
         var config = try DerivedConfig.init(alloc, config_src);
 
-        var descriptors = std.ArrayList(discovery.Descriptor).init(alloc);
-        defer descriptors.deinit();
+        var descriptors: std.ArrayList(discovery.Descriptor) = .empty;
+        defer descriptors.deinit(alloc);
         for (config.@"font-family".list.items) |family| {
-            try descriptors.append(.{
+            try descriptors.append(alloc, .{
                 .family = family,
                 .style = config.@"font-style".nameValue(),
                 .size = font_size.points,
@@ -564,7 +617,7 @@ pub const Key = struct {
         // italic.
         for (config.@"font-family-bold".list.items) |family| {
             const style = config.@"font-style-bold".nameValue();
-            try descriptors.append(.{
+            try descriptors.append(alloc, .{
                 .family = family,
                 .style = style,
                 .size = font_size.points,
@@ -574,7 +627,7 @@ pub const Key = struct {
         }
         for (config.@"font-family-italic".list.items) |family| {
             const style = config.@"font-style-italic".nameValue();
-            try descriptors.append(.{
+            try descriptors.append(alloc, .{
                 .family = family,
                 .style = style,
                 .size = font_size.points,
@@ -584,7 +637,7 @@ pub const Key = struct {
         }
         for (config.@"font-family-bold-italic".list.items) |family| {
             const style = config.@"font-style-bold-italic".nameValue();
-            try descriptors.append(.{
+            try descriptors.append(alloc, .{
                 .family = family,
                 .style = style,
                 .size = font_size.points,
@@ -617,6 +670,7 @@ pub const Key = struct {
             if (config.@"adjust-cursor-thickness") |m| try set.put(alloc, .cursor_thickness, m);
             if (config.@"adjust-cursor-height") |m| try set.put(alloc, .cursor_height, m);
             if (config.@"adjust-box-thickness") |m| try set.put(alloc, .box_thickness, m);
+            if (config.@"adjust-icon-height") |m| try set.put(alloc, .icon_height, m);
             break :set set;
         };
 
@@ -627,7 +681,7 @@ pub const Key = struct {
 
         return .{
             .arena = arena,
-            .descriptors = try descriptors.toOwnedSlice(),
+            .descriptors = try descriptors.toOwnedSlice(alloc),
             .style_offsets = .{
                 regular_offset,
                 bold_offset,

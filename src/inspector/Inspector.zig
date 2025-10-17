@@ -149,7 +149,7 @@ pub fn setup() void {
         font_config.FontDataOwnedByAtlas = false;
         _ = cimgui.c.ImFontAtlas_AddFontFromMemoryTTF(
             io.Fonts,
-            @constCast(@ptrCast(font.embedded.regular)),
+            @ptrCast(@constCast(font.embedded.regular)),
             font.embedded.regular.len,
             font_size,
             font_config,
@@ -172,13 +172,10 @@ pub fn init(surface: *Surface) !Inspector {
         .surface = surface,
         .key_events = key_buf,
         .vt_events = vt_events,
-        .vt_stream = .{
-            .handler = vt_handler,
-            .parser = .{
-                .osc_parser = .{
-                    .alloc = surface.alloc,
-                },
-            },
+        .vt_stream = stream: {
+            var s: inspector.termio.Stream = .init(vt_handler);
+            s.parser.osc_parser.alloc = surface.alloc;
+            break :stream s;
         },
     };
 }
@@ -603,6 +600,7 @@ fn renderModesWindow(self: *Inspector) void {
 
     const t = self.surface.renderer_state.terminal;
     inline for (@typeInfo(terminal.Mode).@"enum".fields) |field| {
+        @setEvalBranchQuota(6000);
         const tag: terminal.modes.ModeTag = @bitCast(@as(terminal.modes.ModeTag.Backing, field.value));
 
         cimgui.c.igTableNextRow(cimgui.c.ImGuiTableRowFlags_None, 0);
@@ -756,7 +754,7 @@ fn renderSizeWindow(self: *Inspector) void {
             {
                 _ = cimgui.c.igTableSetColumnIndex(1);
                 cimgui.c.igText(
-                    "%d px",
+                    "%.2f px",
                     self.surface.font_size.pixels(),
                 );
             }

@@ -22,25 +22,28 @@ pub fn build(b: *std.Build) !void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    var flags = std.ArrayList([]const u8).init(b.allocator);
-    defer flags.deinit();
-    try flags.appendSlice(&.{
+    var flags: std.ArrayList([]const u8) = .empty;
+    defer flags.deinit(b.allocator);
+    try flags.appendSlice(b.allocator, &.{
         "-DHAVE_CONFIG_H",
         "-DLOCALEDIR=\"\"",
     });
 
     {
-        const lib = b.addStaticLibrary(.{
+        const lib = b.addLibrary(.{
             .name = "intl",
-            .target = target,
-            .optimize = optimize,
+            .root_module = b.createModule(.{
+                .target = target,
+                .optimize = optimize,
+            }),
+            .linkage = .static,
         });
         lib.linkLibC();
         lib.addIncludePath(b.path(""));
 
         if (target.result.os.tag.isDarwin()) {
             const apple_sdk = @import("apple_sdk");
-            try apple_sdk.addPaths(b, lib.root_module);
+            try apple_sdk.addPaths(b, lib);
         }
 
         if (b.lazyDependency("gettext", .{})) |upstream| {

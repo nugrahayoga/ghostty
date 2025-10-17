@@ -7,7 +7,6 @@ const Allocator = std.mem.Allocator;
 const posix = std.posix;
 const build_config = @import("build_config.zig");
 const options = @import("build_options");
-const glfw = @import("glfw");
 const glslang = @import("glslang");
 const macos = @import("macos");
 const oni = @import("oniguruma");
@@ -36,7 +35,9 @@ pub fn main() !MainReturn {
     // a global is because the C API needs to be able to access this state;
     // no other Zig code should EVER access the global state.
     state.init() catch |err| {
-        const stderr = std.io.getStdErr().writer();
+        var buffer: [1024]u8 = undefined;
+        var stderr_writer = std.fs.File.stderr().writer(&buffer);
+        const stderr = &stderr_writer.interface;
         defer posix.exit(1);
         const ErrSet = @TypeOf(err) || error{Unknown};
         switch (@as(ErrSet, @errorCast(err))) {
@@ -55,6 +56,7 @@ pub fn main() !MainReturn {
 
             else => try stderr.print("invalid CLI invocation err={}\n", .{err}),
         }
+        try stderr.flush();
     };
     defer state.deinit();
     const alloc = state.alloc;
@@ -98,11 +100,12 @@ pub fn main() !MainReturn {
     }
 
     // Create our app state
-    var app = try App.create(alloc);
+    const app: *App = try App.create(alloc);
     defer app.destroy();
 
     // Create our runtime app
-    var app_runtime = try apprt.App.init(app, .{});
+    var app_runtime: apprt.App = undefined;
+    try app_runtime.init(app, .{});
     defer app_runtime.terminate();
 
     // Since - by definition - there are no surfaces when first started, the
@@ -154,8 +157,12 @@ fn logFn(
 
         .stderr => {
             // Always try default to send to stderr
-            const stderr = std.io.getStdErr().writer();
-            nosuspend stderr.print(level_txt ++ prefix ++ format ++ "\n", args) catch return;
+            var buffer: [1024]u8 = undefined;
+            var stderr = std.fs.File.stderr().writer(&buffer);
+            const writer = &stderr.interface;
+            nosuspend writer.print(level_txt ++ prefix ++ format ++ "\n", args) catch return;
+            // TODO: Do we want to use flushless stderr in the future?
+            writer.flush() catch {};
         },
     }
 }
@@ -182,11 +189,22 @@ test {
     _ = @import("surface_mouse.zig");
 
     // Libraries
+    _ = @import("benchmark/main.zig");
     _ = @import("crash/main.zig");
     _ = @import("datastruct/main.zig");
     _ = @import("inspector/main.zig");
     _ = @import("terminal/main.zig");
     _ = @import("terminfo/main.zig");
     _ = @import("simd/main.zig");
+    _ = @import("synthetic/main.zig");
     _ = @import("unicode/main.zig");
+    _ = @import("unicode/props_uucode.zig");
+    _ = @import("unicode/symbols_uucode.zig");
+
+    // Extra
+    _ = @import("extra/bash.zig");
+    _ = @import("extra/fish.zig");
+    _ = @import("extra/sublime.zig");
+    _ = @import("extra/vim.zig");
+    _ = @import("extra/zsh.zig");
 }

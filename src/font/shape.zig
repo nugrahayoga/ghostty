@@ -2,6 +2,9 @@ const builtin = @import("builtin");
 const options = @import("main.zig").options;
 const run = @import("shaper/run.zig");
 const feature = @import("shaper/feature.zig");
+const configpkg = @import("../config.zig");
+const terminal = @import("../terminal/main.zig");
+const SharedGrid = @import("main.zig").SharedGrid;
 pub const noop = @import("shaper/noop.zig");
 pub const harfbuzz = @import("shaper/harfbuzz.zig");
 pub const coretext = @import("shaper/coretext.zig");
@@ -35,9 +38,11 @@ pub const Shaper = switch (options.backend) {
 /// for a shaping call. Note all terminal cells may be present; only
 /// cells that have a glyph that needs to be rendered.
 pub const Cell = struct {
-    /// The column that this cell occupies. Since a set of shaper cells is
-    /// always on the same line, only the X is stored. It is expected the
-    /// caller has access to the original screen cell.
+    /// The X position of this shaper cell relative to the offset of the
+    /// run. Because runs are always within a single row, it is expected
+    /// that the caller can reconstruct the full position of the cell by
+    /// using the known Y position of the cell and adding the X position
+    /// to the run offset.
     x: u16,
 
     /// An additional offset to apply to the rendering.
@@ -59,6 +64,38 @@ pub const Options = struct {
     /// want to support per-face feature configuration. For now, we only
     /// support applying features globally.
     features: []const []const u8 = &.{},
+};
+
+/// Options for runIterator.
+pub const RunOptions = struct {
+    /// The font state for the terminal screen. This is mutable because
+    /// cached values may be updated during shaping.
+    grid: *SharedGrid,
+
+    /// The terminal screen to shape.
+    screen: *const terminal.Screen,
+
+    /// The row within the screen to shape. This row must exist within
+    /// screen; it is not validated.
+    row: terminal.Pin,
+
+    /// The selection boundaries. This is used to break shaping on
+    /// selection boundaries. This can be disabled by setting this to
+    /// null.
+    selection: ?terminal.Selection = null,
+
+    /// The cursor position within this row. This is used to break shaping
+    /// on cursor boundaries. This can be disabled by setting this to
+    /// null.
+    cursor_x: ?usize = null,
+
+    /// Apply the font break configuration to the run.
+    pub fn applyBreakConfig(
+        self: *RunOptions,
+        config: configpkg.FontShapingBreak,
+    ) void {
+        if (!config.cursor) self.cursor_x = null;
+    }
 };
 
 test {

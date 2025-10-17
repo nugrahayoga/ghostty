@@ -3,6 +3,7 @@
 const StringMap = @This();
 
 const std = @import("std");
+const build_options = @import("terminal_options");
 const oni = @import("oniguruma");
 const point = @import("point.zig");
 const Selection = @import("Selection.zig");
@@ -19,7 +20,13 @@ pub fn deinit(self: StringMap, alloc: Allocator) void {
 }
 
 /// Returns an iterator that yields the next match of the given regex.
-pub fn searchIterator(
+/// Requires Ghostty to be compiled with regex support.
+pub const searchIterator = if (build_options.oniguruma)
+    searchIteratorOni
+else
+    void;
+
+fn searchIteratorOni(
     self: StringMap,
     regex: oni.Regex,
 ) SearchIterator {
@@ -80,11 +87,13 @@ pub const Match = struct {
         const end_idx: usize = @intCast(self.region.ends()[0] - 1);
         const start_pt = self.map.map[self.offset + start_idx];
         const end_pt = self.map.map[self.offset + end_idx];
-        return Selection.init(start_pt, end_pt, false);
+        return .init(start_pt, end_pt, false);
     }
 };
 
 test "StringMap searchIterator" {
+    if (comptime !build_options.oniguruma) return error.SkipZigTest;
+
     const testing = std.testing;
     const alloc = testing.allocator;
 

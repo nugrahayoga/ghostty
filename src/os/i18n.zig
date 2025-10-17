@@ -1,35 +1,9 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const build_config = @import("../build_config.zig");
+const locales = @import("i18n_locales.zig");
 
 const log = std.log.scoped(.i18n);
-
-/// Supported locales for the application. This must be kept up to date
-/// with the translations available in the `po/` directory; this is used
-/// by our build process as well runtime libghostty APIs.
-///
-/// The order also matters. For incomplete locale information (i.e. only
-/// a language code available), the first match is used. For example, if
-/// we know the user requested `zh` but has no script code, then we'd pick
-/// the first locale that matches `zh`.
-///
-/// For ordering, we prefer:
-///
-///   1. The most common locales first, since there are places in the code
-///      where we do linear searches for a locale and we want to minimize
-///      the number of iterations for the common case.
-///
-///   2. Alphabetical for otherwise equally common locales.
-///
-///   3. Most preferred locale for a language without a country code.
-///
-pub const locales = [_][:0]const u8{
-    "de_DE.UTF-8",
-    "zh_CN.UTF-8",
-    "nb_NO.UTF-8",
-    "uk_UA.UTF-8",
-    "pl_PL.UTF-8",
-};
 
 /// Set for faster membership lookup of locales.
 pub const locales_map = map: {
@@ -52,23 +26,29 @@ pub const InitError = error{
 /// want to set the domain for the entire application since this is also
 /// used by libghostty.
 pub fn init(resources_dir: []const u8) InitError!void {
-    // i18n is unsupported on Windows
-    if (builtin.os.tag == .windows) return;
+    if (comptime !build_config.i18n) return;
 
-    // Our resources dir is always nested below the share dir that
-    // is standard for translations.
-    const share_dir = std.fs.path.dirname(resources_dir) orelse
-        return error.InvalidResourcesDir;
+    switch (builtin.os.tag) {
+        // i18n is unsupported on Windows
+        .windows => return,
 
-    // Build our locale path
-    var buf: [std.fs.max_path_bytes]u8 = undefined;
-    const path = std.fmt.bufPrintZ(&buf, "{s}/locale", .{share_dir}) catch
-        return error.OutOfMemory;
+        else => {
+            // Our resources dir is always nested below the share dir that
+            // is standard for translations.
+            const share_dir = std.fs.path.dirname(resources_dir) orelse
+                return error.InvalidResourcesDir;
 
-    // Bind our bundle ID to the given locale path
-    log.debug("binding domain={s} path={s}", .{ build_config.bundle_id, path });
-    _ = bindtextdomain(build_config.bundle_id, path.ptr) orelse
-        return error.OutOfMemory;
+            // Build our locale path
+            var buf: [std.fs.max_path_bytes]u8 = undefined;
+            const path = std.fmt.bufPrintZ(&buf, "{s}/locale", .{share_dir}) catch
+                return error.OutOfMemory;
+
+            // Bind our bundle ID to the given locale path
+            log.debug("binding domain={s} path={s}", .{ build_config.bundle_id, path });
+            _ = bindtextdomain(build_config.bundle_id, path.ptr) orelse
+                return error.OutOfMemory;
+        },
+    }
 }
 
 /// Set the global gettext domain to our bundle ID, allowing unqualified
@@ -77,11 +57,13 @@ pub fn init(resources_dir: []const u8) InitError!void {
 /// This should only be called for apprts that are fully owning the
 /// Ghostty application. This should not be called for libghostty users.
 pub fn initGlobalDomain() error{OutOfMemory}!void {
+    if (comptime !build_config.i18n) return;
     _ = textdomain(build_config.bundle_id) orelse return error.OutOfMemory;
 }
 
 /// Translate a message for the Ghostty domain.
 pub fn _(msgid: [*:0]const u8) [*:0]const u8 {
+    if (comptime !build_config.i18n) return msgid;
     return dgettext(build_config.bundle_id, msgid);
 }
 
@@ -107,8 +89,20 @@ pub fn canonicalizeLocale(
     buf: []u8,
     locale: []const u8,
 ) error{NoSpaceLeft}![:0]const u8 {
+    if (comptime !build_config.i18n) {
+        if (buf.len < locale.len + 1) return error.NoSpaceLeft;
+        @memcpy(buf[0..locale.len], locale);
+        buf[locale.len] = 0;
+        return buf[0..locale.len :0];
+    }
+
     // Fix zh locales for macOS
-    if (fixZhLocale(locale)) |fixed| return fixed;
+    if (fixZhLocale(locale)) |fixed| {
+        if (buf.len < fixed.len + 1) return error.NoSpaceLeft;
+        @memcpy(buf[0..fixed.len], fixed);
+        buf[fixed.len] = 0;
+        return buf[0..fixed.len :0];
+    }
 
     // Buffer must be 16 or at least as long as the locale and null term
     if (buf.len < @max(16, locale.len + 1)) return error.NoSpaceLeft;

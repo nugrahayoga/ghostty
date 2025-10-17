@@ -20,7 +20,7 @@ pub const c = @cImport({
 
 const input = @import("../../../input.zig");
 const Config = @import("../../../config.zig").Config;
-const ApprtWindow = @import("../Window.zig");
+const ApprtWindow = @import("../class/window.zig").Window;
 
 const log = std.log.scoped(.gtk_x11);
 
@@ -36,16 +36,11 @@ pub const App = struct {
         config: *const Config,
     ) !?App {
         // If the display isn't X11, then we don't need to do anything.
-        if (gobject.typeCheckInstanceIsA(
-            gdk_display.as(gobject.TypeInstance),
-            gdk_x11.X11Display.getGObjectType(),
-        ) == 0) return null;
-
-        // Get our X11 display
         const gdk_x11_display = gobject.ext.cast(
             gdk_x11.X11Display,
             gdk_display,
         ) orelse return null;
+
         const xlib_display = gdk_x11_display.getXdisplay();
 
         const x11_program_name: [:0]const u8 = if (config.@"x11-instance-name") |pn|
@@ -109,7 +104,7 @@ pub const App = struct {
         return .{
             .display = xlib_display,
             .base_event_code = base_event_code,
-            .atoms = Atoms.init(gdk_x11_display),
+            .atoms = .init(gdk_x11_display),
         };
     }
 
@@ -175,9 +170,8 @@ pub const App = struct {
 
 pub const Window = struct {
     app: *App,
-    config: *const ApprtWindow.DerivedConfig,
-    window: xlib.Window,
-    gtk_window: *adw.ApplicationWindow,
+    apprt_window: *ApprtWindow,
+    x11_surface: *gdk_x11.X11Surface,
 
     blur_region: Region = .{},
 
@@ -188,15 +182,7 @@ pub const Window = struct {
     ) !Window {
         _ = alloc;
 
-        const surface = apprt_window.window.as(
-            gtk.Native,
-        ).getSurface() orelse return error.NotX11Surface;
-
-        // Check if we're actually on X11
-        if (gobject.typeCheckInstanceIsA(
-            surface.as(gobject.TypeInstance),
-            gdk_x11.X11Surface.getGObjectType(),
-        ) == 0)
+        const surface = apprt_window.as(gtk.Native).getSurface() orelse
             return error.NotX11Surface;
 
         const x11_surface = gobject.ext.cast(
@@ -206,9 +192,8 @@ pub const Window = struct {
 
         return .{
             .app = app,
-            .config = &apprt_window.config,
-            .window = x11_surface.getXid(),
-            .gtk_window = apprt_window.window,
+            .apprt_window = apprt_window,
+            .x11_surface = x11_surface,
         };
     }
 
@@ -233,10 +218,10 @@ pub const Window = struct {
             var x: f64 = 0;
             var y: f64 = 0;
 
-            self.gtk_window.as(gtk.Native).getSurfaceTransform(&x, &y);
+            self.apprt_window.as(gtk.Native).getSurfaceTransform(&x, &y);
 
             // Transform surface coordinates to device coordinates.
-            const scale: f64 = @floatFromInt(self.gtk_window.as(gtk.Widget).getScaleFactor());
+            const scale: f64 = @floatFromInt(self.apprt_window.as(gtk.Widget).getScaleFactor());
             x *= scale;
             y *= scale;
 
@@ -254,7 +239,7 @@ pub const Window = struct {
     }
 
     pub fn clientSideDecorationEnabled(self: Window) bool {
-        return switch (self.config.window_decoration) {
+        return switch (self.apprt_window.getWindowDecoration()) {
             .auto, .client => true,
             .server, .none => false,
         };
@@ -269,17 +254,18 @@ pub const Window = struct {
         // and I think it's not really noticeable enough to justify the effort.
         // (Wayland also has this visual artifact anyway...)
 
-        const gtk_widget = self.gtk_window.as(gtk.Widget);
+        const gtk_widget = self.apprt_window.as(gtk.Widget);
+        const config = if (self.apprt_window.getConfig()) |v| v.get() else return;
 
         // Transform surface coordinates to device coordinates.
-        const scale = self.gtk_window.as(gtk.Widget).getScaleFactor();
+        const scale = gtk_widget.getScaleFactor();
         self.blur_region.width = gtk_widget.getWidth() * scale;
         self.blur_region.height = gtk_widget.getHeight() * scale;
 
-        const blur = self.config.background_blur;
+        const blur = config.@"background-blur";
         log.debug("set blur={}, window xid={}, region={}", .{
             blur,
-            self.window,
+            self.x11_surface.getXid(),
             self.blur_region,
         });
 
@@ -318,7 +304,7 @@ pub const Window = struct {
         };
 
         hints.flags.decorations = true;
-        hints.decorations.all = switch (self.config.window_decoration) {
+        hints.decorations.all = switch (self.apprt_window.getWindowDecoration()) {
             .server => true,
             .auto, .client, .none => false,
         };
@@ -335,9 +321,17 @@ pub const Window = struct {
 
     pub fn addSubprocessEnv(self: *Window, env: *std.process.EnvMap) !void {
         var buf: [64]u8 = undefined;
-        const window_id = try std.fmt.bufPrint(&buf, "{}", .{self.window});
+        const window_id = try std.fmt.bufPrint(
+            &buf,
+            "{}",
+            .{self.x11_surface.getXid()},
+        );
 
         try env.put("WINDOWID", window_id);
+    }
+
+    pub fn setUrgent(self: *Window, urgent: bool) !void {
+        self.x11_surface.setUrgencyHint(@intFromBool(urgent));
     }
 
     fn getWindowProperty(
@@ -363,7 +357,7 @@ pub const Window = struct {
 
         const code = c.XGetWindowProperty(
             @ptrCast(@alignCast(self.app.display)),
-            self.window,
+            self.x11_surface.getXid(),
             name,
             options.offset,
             options.length,
@@ -401,7 +395,7 @@ pub const Window = struct {
 
         const status = c.XChangeProperty(
             @ptrCast(@alignCast(self.app.display)),
-            self.window,
+            self.x11_surface.getXid(),
             name,
             typ,
             @intFromEnum(format),
@@ -419,7 +413,7 @@ pub const Window = struct {
     fn deleteProperty(self: *Window, name: c.Atom) X11Error!void {
         const status = c.XDeleteProperty(
             @ptrCast(@alignCast(self.app.display)),
-            self.window,
+            self.x11_surface.getXid(),
             name,
         );
         if (status == 0) return error.RequestFailed;

@@ -1,7 +1,7 @@
 const std = @import("std");
 const args = @import("args.zig");
 const Allocator = std.mem.Allocator;
-const Action = @import("action.zig").Action;
+const Action = @import("ghostty.zig").Action;
 const configpkg = @import("../config.zig");
 const Config = configpkg.Config;
 
@@ -77,7 +77,10 @@ pub fn run(alloc: Allocator) !u8 {
 
     // For some reason `std.fmt.format` isn't working here but it works in
     // tests so we just do configfmt.format.
-    const stdout = std.io.getStdOut().writer();
-    try configfmt.format("", .{}, stdout);
+    var stdout: std.fs.File = .stdout();
+    var buffer: [4096]u8 = undefined;
+    var stdout_writer = stdout.writer(&buffer);
+    try configfmt.format(&stdout_writer.interface);
+    try stdout_writer.end();
     return 0;
 }

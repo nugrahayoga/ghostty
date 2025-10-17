@@ -1,5 +1,6 @@
 const std = @import("std");
 const assert = std.debug.assert;
+const configpkg = @import("../config.zig");
 const color = @import("color.zig");
 const sgr = @import("sgr.zig");
 const page = @import("page.zig");
@@ -7,9 +8,6 @@ const size = @import("size.zig");
 const Offset = size.Offset;
 const OffsetBuf = size.OffsetBuf;
 const RefCountedSet = @import("ref_counted_set.zig").RefCountedSet;
-
-const XxHash3 = std.hash.XxHash3;
-const autoHash = std.hash.autoHash;
 
 /// The unique identifier for a style. This is at most the number of cells
 /// that can fit into a terminal page.
@@ -62,7 +60,7 @@ pub const Style = struct {
             self: Color,
             comptime fmt: []const u8,
             options: std.fmt.FormatOptions,
-            writer: anytype,
+            writer: *std.Io.Writer,
         ) !void {
             _ = fmt;
             _ = options;
@@ -86,11 +84,23 @@ pub const Style = struct {
     }
 
     /// True if the style is equal to another style.
+    /// For performance do direct comparisons first.
     pub fn eql(self: Style, other: Style) bool {
-        const packed_self = PackedStyle.fromStyle(self);
-        const packed_other = PackedStyle.fromStyle(other);
-        // TODO: in Zig 0.14, equating packed structs is allowed. Remove this work around.
-        return @as(u128, @bitCast(packed_self)) == @as(u128, @bitCast(packed_other));
+        inline for (comptime std.meta.fields(Style)) |field| {
+            if (comptime std.meta.hasUniqueRepresentation(field.type)) {
+                if (@field(self, field.name) != @field(other, field.name)) {
+                    return false;
+                }
+            }
+        }
+        inline for (comptime std.meta.fields(Style)) |field| {
+            if (comptime !std.meta.hasUniqueRepresentation(field.type)) {
+                if (!std.meta.eql(@field(self, field.name), @field(other, field.name))) {
+                    return false;
+                }
+            }
+        }
+        return true;
     }
 
     /// Returns the bg color for a cell with this style given the cell
@@ -119,24 +129,65 @@ pub const Style = struct {
         };
     }
 
-    /// Returns the fg color for a cell with this style given the palette.
+    pub const Fg = struct {
+        /// The default color to use if the style doesn't specify a
+        /// foreground color and no configuration options override
+        /// it.
+        default: color.RGB,
+
+        /// The current color palette. Required to map palette indices to
+        /// real color values.
+        palette: *const color.Palette,
+
+        /// If specified, the color to use for bold text.
+        bold: ?configpkg.BoldColor = null,
+    };
+
+    /// Returns the fg color for a cell with this style given the palette
+    /// and various configuration options.
     pub fn fg(
         self: Style,
-        palette: *const color.Palette,
-        bold_is_bright: bool,
-    ) ?color.RGB {
+        opts: Fg,
+    ) color.RGB {
+        // Note we don't pull the bold check to the top-level here because
+        // we don't want to duplicate the conditional multiple times since
+        // certain colors require more checks (e.g. `bold_is_bright`).
+
         return switch (self.fg_color) {
-            .none => null,
-            .palette => |idx| palette: {
-                if (bold_is_bright and self.flags.bold) {
-                    const bright_offset = @intFromEnum(color.Name.bright_black);
-                    if (idx < bright_offset)
-                        break :palette palette[idx + bright_offset];
+            .none => default: {
+                if (self.flags.bold) {
+                    if (opts.bold) |bold| switch (bold) {
+                        .bright => {},
+                        .color => |v| break :default v.toTerminalRGB(),
+                    };
                 }
 
-                break :palette palette[idx];
+                break :default opts.default;
             },
-            .rgb => |rgb| rgb,
+
+            .palette => |idx| palette: {
+                if (self.flags.bold) {
+                    if (opts.bold) |_| {
+                        const bright_offset = @intFromEnum(color.Name.bright_black);
+                        if (idx < bright_offset) {
+                            break :palette opts.palette[idx + bright_offset];
+                        }
+                    }
+                }
+
+                break :palette opts.palette[idx];
+            },
+
+            .rgb => |rgb| rgb: {
+                if (self.flags.bold and rgb.eql(opts.default)) {
+                    if (opts.bold) |bold| switch (bold) {
+                        .color => |v| break :rgb v.toTerminalRGB(),
+                        .bright => {},
+                    };
+                }
+
+                break :rgb rgb;
+            },
         };
     }
 
@@ -177,7 +228,7 @@ pub const Style = struct {
         self: Style,
         comptime fmt: []const u8,
         options: std.fmt.FormatOptions,
-        writer: anytype,
+        writer: *std.Io.Writer,
     ) !void {
         _ = fmt;
         _ = options;
@@ -303,9 +354,9 @@ pub const Style = struct {
                     .underline = std.meta.activeTag(style.underline_color),
                 },
                 .data = .{
-                    .fg = Data.fromColor(style.fg_color),
-                    .bg = Data.fromColor(style.bg_color),
-                    .underline = Data.fromColor(style.underline_color),
+                    .fg = .fromColor(style.fg_color),
+                    .bg = .fromColor(style.bg_color),
+                    .underline = .fromColor(style.underline_color),
                 },
                 .flags = style.flags,
             };
@@ -314,12 +365,15 @@ pub const Style = struct {
 
     pub fn hash(self: *const Style) u64 {
         const packed_style = PackedStyle.fromStyle(self.*);
-        return XxHash3.hash(0, std.mem.asBytes(&packed_style));
+        return std.hash.XxHash3.hash(0, std.mem.asBytes(&packed_style));
     }
 
     comptime {
         assert(@sizeOf(PackedStyle) == 16);
         assert(std.meta.hasUniqueRepresentation(PackedStyle));
+        for (@typeInfo(PackedStyle.Data).@"union".fields) |field| {
+            assert(@bitSizeOf(field.type) == @bitSizeOf(PackedStyle.Data));
+        }
     }
 };
 
@@ -350,7 +404,7 @@ test "Set basic usage" {
     const style: Style = .{ .flags = .{ .bold = true } };
     const style2: Style = .{ .flags = .{ .italic = true } };
 
-    var set = Set.init(OffsetBuf.init(buf), layout, .{});
+    var set = Set.init(.init(buf), layout, .{});
 
     // Add style
     const id = try set.add(buf, style);

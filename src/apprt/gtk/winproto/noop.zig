@@ -5,7 +5,7 @@ const gdk = @import("gdk");
 
 const Config = @import("../../../config.zig").Config;
 const input = @import("../../../input.zig");
-const ApprtWindow = @import("../Window.zig");
+const ApprtWindow = @import("../class/window.zig").Window;
 
 const log = std.log.scoped(.winproto_noop);
 
@@ -70,4 +70,6 @@ pub const Window = struct {
     }
 
     pub fn addSubprocessEnv(_: *Window, _: *std.process.EnvMap) !void {}
+
+    pub fn setUrgent(_: *Window, _: bool) !void {}
 };

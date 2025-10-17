@@ -99,6 +99,10 @@ const PosixPty = struct {
             @cInclude("sys/ioctl.h"); // ioctl and constants
             @cInclude("util.h"); // openpty()
         }),
+        .freebsd => @cImport({
+            @cInclude("termios.h"); // ioctl and constants
+            @cInclude("libutil.h"); // openpty()
+        }),
         else => @cImport({
             @cInclude("sys/ioctl.h"); // ioctl and constants
             @cInclude("pty.h");
@@ -212,7 +216,7 @@ const PosixPty = struct {
         // Reset our signals
         var sa: posix.Sigaction = .{
             .handler = .{ .handler = posix.SIG.DFL },
-            .mask = posix.empty_sigset,
+            .mask = posix.sigemptyset(),
             .flags = 0,
         };
         posix.sigaction(posix.SIG.ABRT, &sa, null);

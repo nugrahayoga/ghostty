@@ -9,6 +9,25 @@ const configpkg = @import("../config.zig");
 
 const log = std.log.scoped(.shadertoy);
 
+/// The uniform struct used for shadertoy shaders.
+pub const Uniforms = extern struct {
+    resolution: [3]f32 align(16),
+    time: f32 align(4),
+    time_delta: f32 align(4),
+    frame_rate: f32 align(4),
+    frame: i32 align(4),
+    channel_time: [4][4]f32 align(16),
+    channel_resolution: [4][4]f32 align(16),
+    mouse: [4]f32 align(16),
+    date: [4]f32 align(16),
+    sample_rate: f32 align(4),
+    current_cursor: [4]f32 align(16),
+    previous_cursor: [4]f32 align(16),
+    current_cursor_color: [4]f32 align(16),
+    previous_cursor_color: [4]f32 align(16),
+    cursor_change_time: f32 align(4),
+};
+
 /// The target to load shaders for.
 pub const Target = enum { glsl, msl };
 
@@ -19,8 +38,8 @@ pub fn loadFromFiles(
     paths: configpkg.RepeatablePath,
     target: Target,
 ) ![]const [:0]const u8 {
-    var list = std.ArrayList([:0]const u8).init(alloc_gpa);
-    defer list.deinit();
+    var list: std.ArrayList([:0]const u8) = .empty;
+    defer list.deinit(alloc_gpa);
     errdefer for (list.items) |shader| alloc_gpa.free(shader);
 
     for (paths.value.items) |item| {
@@ -37,10 +56,10 @@ pub fn loadFromFiles(
             return err;
         };
         log.info("loaded custom shader path={s}", .{path});
-        try list.append(shader);
+        try list.append(alloc_gpa, shader);
     }
 
-    return try list.toOwnedSlice();
+    return try list.toOwnedSlice(alloc_gpa);
 }
 
 /// Load a single shader from a file and convert it to the target language
@@ -54,34 +73,33 @@ pub fn loadFromFile(
     defer arena.deinit();
     const alloc = arena.allocator();
 
-    // Load the shader file
-    const cwd = std.fs.cwd();
-    const file = try cwd.openFile(path, .{});
-    defer file.close();
-
     // Read it all into memory -- we don't expect shaders to be large.
-    var buf_reader = std.io.bufferedReader(file.reader());
-    const src = try buf_reader.reader().readAllAlloc(
-        alloc,
-        4 * 1024 * 1024, // 4MB
-    );
+    const src = src: {
+        // Load the shader file
+        const cwd = std.fs.cwd();
+        const file = try cwd.openFile(path, .{});
+        defer file.close();
+
+        break :src try file.readToEndAlloc(
+            alloc,
+            4 * 1024 * 1024, // 4MB
+        );
+    };
 
     // Convert to full GLSL
     const glsl: [:0]const u8 = glsl: {
-        var list = std.ArrayList(u8).init(alloc);
-        try glslFromShader(list.writer(), src);
-        try list.append(0);
-        break :glsl list.items[0 .. list.items.len - 1 :0];
+        var stream: std.Io.Writer.Allocating = .init(alloc);
+        try glslFromShader(&stream.writer, src);
+        try stream.writer.writeByte(0);
+        break :glsl stream.written()[0 .. stream.written().len - 1 :0];
     };
 
     // Convert to SPIR-V
     const spirv: []const u8 = spirv: {
-        // SpirV pointer must be aligned to 4 bytes since we expect
-        // a slice of words.
-        var list = std.ArrayListAligned(u8, @alignOf(u32)).init(alloc);
+        var stream: std.Io.Writer.Allocating = .init(alloc);
         var errlog: SpirvLog = .{ .alloc = alloc };
         defer errlog.deinit();
-        spirvFromGlsl(list.writer(), &errlog, glsl) catch |err| {
+        spirvFromGlsl(&stream.writer, &errlog, glsl) catch |err| {
             if (errlog.info.len > 0 or errlog.debug.len > 0) {
                 log.warn("spirv error path={s} info={s} debug={s}", .{
                     path,
@@ -92,6 +110,11 @@ pub fn loadFromFile(
 
             return err;
         };
+
+        // SpirV pointer must be aligned to 4 bytes since we expect
+        // a slice of words.
+        var list: std.ArrayListAligned(u8, .of(u32)) = .empty;
+        try list.appendSlice(alloc, stream.written());
         break :spirv list.items;
     };
 
@@ -110,7 +133,7 @@ pub fn loadFromFile(
 /// mainImage function and don't define any of the uniforms. This function
 /// will convert the ShaderToy shader into a valid GLSL shader that can be
 /// compiled and linked.
-pub fn glslFromShader(writer: anytype, src: []const u8) !void {
+pub fn glslFromShader(writer: *std.Io.Writer, src: []const u8) !void {
     const prefix = @embedFile("shaders/shadertoy_prefix.glsl");
     try writer.writeAll(prefix);
     try writer.writeAll("\n\n");
@@ -119,7 +142,7 @@ pub fn glslFromShader(writer: anytype, src: []const u8) !void {
 
 /// Convert a GLSL shader into SPIR-V assembly.
 pub fn spirvFromGlsl(
-    writer: anytype,
+    writer: *std.Io.Writer,
     errlog: ?*SpirvLog,
     src: [:0]const u8,
 ) !void {
@@ -205,18 +228,25 @@ pub const SpirvLog = struct {
 
 /// Convert SPIR-V binary to MSL.
 pub fn mslFromSpv(alloc: Allocator, spv: []const u8) ![:0]const u8 {
-    return try spvCross(alloc, spvcross.c.SPVC_BACKEND_MSL, spv, null);
+    const c = spvcross.c;
+    return try spvCross(alloc, spvcross.c.SPVC_BACKEND_MSL, spv, (struct {
+        fn setOptions(options: c.spvc_compiler_options) error{SpvcFailed}!void {
+            // We enable decoration binding, because we need this
+            // to properly locate the uniform block to index 1.
+            if (c.spvc_compiler_options_set_bool(
+                options,
+                c.SPVC_COMPILER_OPTION_MSL_ENABLE_DECORATION_BINDING,
+                c.SPVC_TRUE,
+            ) != c.SPVC_SUCCESS) {
+                return error.SpvcFailed;
+            }
+        }
+    }).setOptions);
 }
 
-/// Convert SPIR-V binary to GLSL..
+/// Convert SPIR-V binary to GLSL.
 pub fn glslFromSpv(alloc: Allocator, spv: []const u8) ![:0]const u8 {
-    // Our minimum version for shadertoy shaders is OpenGL 4.2 because
-    // Spirv-Cross generates binding locations for uniforms which is
-    // only supported in OpenGL 4.2 and above.
-    //
-    // If we can figure out a way to NOT do this then we can lower this
-    // version.
-    const GLSL_VERSION = 420;
+    const GLSL_VERSION = 430;
 
     const c = spvcross.c;
     return try spvCross(alloc, c.SPVC_BACKEND_GLSL, spv, (struct {
@@ -250,7 +280,7 @@ fn spvCross(
     // It would be better to get this out into an output parameter to
     // show users but for now we can just log it.
     c.spvc_context_set_error_callback(ctx, @ptrCast(&(struct {
-        fn callback(_: ?*anyopaque, msg_ptr: [*c]const u8) callconv(.C) void {
+        fn callback(_: ?*anyopaque, msg_ptr: [*c]const u8) callconv(.c) void {
             const msg = std.mem.sliceTo(msg_ptr, 0);
             std.log.warn("spirv-cross error message={s}", .{msg});
         }
@@ -305,10 +335,10 @@ fn spvCross(
 
 /// Convert ShaderToy shader to null-terminated glsl for testing.
 fn testGlslZ(alloc: Allocator, src: []const u8) ![:0]const u8 {
-    var list = std.ArrayList(u8).init(alloc);
-    defer list.deinit();
-    try glslFromShader(list.writer(), src);
-    return try list.toOwnedSliceSentinel(0);
+    var buf: std.Io.Writer.Allocating = .init(alloc);
+    defer buf.deinit();
+    try glslFromShader(&buf.writer, src);
+    return try buf.toOwnedSliceSentinel(0);
 }
 
 test "spirv" {
@@ -319,9 +349,8 @@ test "spirv" {
     defer alloc.free(src);
 
     var buf: [4096 * 4]u8 = undefined;
-    var buf_stream = std.io.fixedBufferStream(&buf);
-    const writer = buf_stream.writer();
-    try spirvFromGlsl(writer, null, src);
+    var writer: std.Io.Writer = .fixed(&buf);
+    try spirvFromGlsl(&writer, null, src);
 }
 
 test "spirv invalid" {
@@ -332,12 +361,11 @@ test "spirv invalid" {
     defer alloc.free(src);
 
     var buf: [4096 * 4]u8 = undefined;
-    var buf_stream = std.io.fixedBufferStream(&buf);
-    const writer = buf_stream.writer();
+    var writer: std.Io.Writer = .fixed(&buf);
 
     var errlog: SpirvLog = .{ .alloc = alloc };
     defer errlog.deinit();
-    try testing.expectError(error.GlslangFailed, spirvFromGlsl(writer, &errlog, src));
+    try testing.expectError(error.GlslangFailed, spirvFromGlsl(&writer, &errlog, src));
     try testing.expect(errlog.info.len > 0);
 }
 
@@ -348,9 +376,14 @@ test "shadertoy to msl" {
     const src = try testGlslZ(alloc, test_crt);
     defer alloc.free(src);
 
-    var spvlist = std.ArrayListAligned(u8, @alignOf(u32)).init(alloc);
-    defer spvlist.deinit();
-    try spirvFromGlsl(spvlist.writer(), null, src);
+    var buf: std.Io.Writer.Allocating = .init(alloc);
+    defer buf.deinit();
+    try spirvFromGlsl(&buf.writer, null, src);
+
+    // TODO: Replace this with an aligned version of Writer.Allocating
+    var spvlist: std.ArrayListAligned(u8, .of(u32)) = .empty;
+    defer spvlist.deinit(alloc);
+    try spvlist.appendSlice(alloc, buf.written());
 
     const msl = try mslFromSpv(alloc, spvlist.items);
     defer alloc.free(msl);
@@ -363,9 +396,14 @@ test "shadertoy to glsl" {
     const src = try testGlslZ(alloc, test_crt);
     defer alloc.free(src);
 
-    var spvlist = std.ArrayListAligned(u8, @alignOf(u32)).init(alloc);
-    defer spvlist.deinit();
-    try spirvFromGlsl(spvlist.writer(), null, src);
+    var buf: std.Io.Writer.Allocating = .init(alloc);
+    defer buf.deinit();
+    try spirvFromGlsl(&buf.writer, null, src);
+
+    // TODO: Replace this with an aligned version of Writer.Allocating
+    var spvlist: std.ArrayListAligned(u8, .of(u32)) = .empty;
+    defer spvlist.deinit(alloc);
+    try spvlist.appendSlice(alloc, buf.written());
 
     const glsl = try glslFromSpv(alloc, spvlist.items);
     defer alloc.free(glsl);

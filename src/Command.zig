@@ -33,14 +33,17 @@ const EnvMap = std.process.EnvMap;
 
 const PreExecFn = fn (*Command) void;
 
-/// Path to the command to run. This must be an absolute path. This
-/// library does not do PATH lookup.
-path: []const u8,
+/// Path to the command to run. This doesn't have to be an absolute path,
+/// because use exec functions that search the PATH, if necessary.
+///
+/// This field is null-terminated to avoid a copy for the sake of
+/// adding a null terminator since POSIX systems are so common.
+path: [:0]const u8,
 
 /// Command-line arguments. It is the responsibility of the caller to set
 /// args[0] to the command. If args is empty then args[0] will automatically
 /// be set to equal path.
-args: []const []const u8,
+args: []const [:0]const u8,
 
 /// Environment variables for the child process. If this is null, inherits
 /// the environment variables from this process. These are the exact
@@ -129,9 +132,8 @@ pub fn start(self: *Command, alloc: Allocator) !void {
 
 fn startPosix(self: *Command, arena: Allocator) !void {
     // Null-terminate all our arguments
-    const pathZ = try arena.dupeZ(u8, self.path);
-    const argsZ = try arena.allocSentinel(?[*:0]u8, self.args.len, null);
-    for (self.args, 0..) |arg, i| argsZ[i] = (try arena.dupeZ(u8, arg)).ptr;
+    const argsZ = try arena.allocSentinel(?[*:0]const u8, self.args.len, null);
+    for (self.args, 0..) |arg, i| argsZ[i] = arg.ptr;
 
     // Determine our env vars
     const envp = if (self.env) |env_map|
@@ -184,10 +186,36 @@ fn startPosix(self: *Command, arena: Allocator) !void {
     if (self.pre_exec) |f| f(self);
 
     // Finally, replace our process.
-    _ = posix.execveZ(pathZ, argsZ, envp) catch null;
+    // Note: we must use the "p"-variant of exec here because we
+    // do not guarantee our command is looked up already in the path.
+    const err = posix.execvpeZ(self.path, argsZ, envp);
 
-    // If we are executing this code, the exec failed. In that scenario,
-    // we return a very specific error that can be detected to determine
+    // If we are executing this code, the exec failed. We're in the
+    // child process so there isn't much we can do. We try to output
+    // something reasonable. Its important to note we MUST NOT return
+    // any other error condition from here on out.
+    var stderr_buf: [1024]u8 = undefined;
+    var stderr_writer = std.fs.File.stderr().writer(&stderr_buf);
+    const stderr = &stderr_writer.interface;
+    switch (err) {
+        error.FileNotFound => stderr.print(
+            \\Requested executable not found. Please verify the command is on
+            \\the PATH and try again.
+            \\
+        ,
+            .{},
+        ) catch {},
+
+        else => stderr.print(
+            \\exec syscall failed with unexpected error: {}
+            \\
+        ,
+            .{err},
+        ) catch {},
+    }
+    stderr.flush() catch {};
+
+    // We return a very specific error that can be detected to determine
     // we're in the child.
     return error.ExecFailedInChild;
 }
@@ -319,7 +347,7 @@ fn setupFd(src: File.Handle, target: i32) !void {
                 }
             }
         },
-        .ios, .macos => {
+        .freebsd, .ios, .macos => {
             // Mac doesn't support dup3 so we use dup2. We purposely clear
             // CLO_ON_EXEC for this fd.
             const flags = try posix.fcntl(src, posix.F.GETFD, 0);
@@ -366,7 +394,7 @@ pub fn wait(self: Command, block: bool) !Exit {
         }
     };
 
-    return Exit.init(res.status);
+    return .init(res.status);
 }
 
 /// Sets command->data to data.
@@ -377,91 +405,6 @@ pub fn setData(self: *Command, pointer: ?*anyopaque) void {
 /// Returns command->data.
 pub fn getData(self: Command, comptime DT: type) ?*DT {
     return if (self.data) |ptr| @ptrCast(@alignCast(ptr)) else null;
-}
-
-/// Search for "cmd" in the PATH and return the absolute path. This will
-/// always allocate if there is a non-null result. The caller must free the
-/// resulting value.
-pub fn expandPath(alloc: Allocator, cmd: []const u8) !?[]u8 {
-    // If the command already contains a slash, then we return it as-is
-    // because it is assumed to be absolute or relative.
-    if (std.mem.indexOfScalar(u8, cmd, '/') != null) {
-        return try alloc.dupe(u8, cmd);
-    }
-
-    const PATH = switch (builtin.os.tag) {
-        .windows => blk: {
-            const win_path = std.process.getenvW(std.unicode.utf8ToUtf16LeStringLiteral("PATH")) orelse return null;
-            const path = try std.unicode.utf16LeToUtf8Alloc(alloc, win_path);
-            break :blk path;
-        },
-        else => std.posix.getenvZ("PATH") orelse return null,
-    };
-    defer if (builtin.os.tag == .windows) alloc.free(PATH);
-
-    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    var it = std.mem.tokenizeScalar(u8, PATH, std.fs.path.delimiter);
-    var seen_eacces = false;
-    while (it.next()) |search_path| {
-        // We need enough space in our path buffer to store this
-        const path_len = search_path.len + cmd.len + 1;
-        if (path_buf.len < path_len) return error.PathTooLong;
-
-        // Copy in the full path
-        @memcpy(path_buf[0..search_path.len], search_path);
-        path_buf[search_path.len] = std.fs.path.sep;
-        @memcpy(path_buf[search_path.len + 1 ..][0..cmd.len], cmd);
-        path_buf[path_len] = 0;
-        const full_path = path_buf[0..path_len :0];
-
-        // Stat it
-        const f = std.fs.cwd().openFile(
-            full_path,
-            .{},
-        ) catch |err| switch (err) {
-            error.FileNotFound => continue,
-            error.AccessDenied => {
-                // Accumulate this and return it later so we can try other
-                // paths that we have access to.
-                seen_eacces = true;
-                continue;
-            },
-            else => return err,
-        };
-        defer f.close();
-        const stat = try f.stat();
-        if (stat.kind != .directory and isExecutable(stat.mode)) {
-            return try alloc.dupe(u8, full_path);
-        }
-    }
-
-    if (seen_eacces) return error.AccessDenied;
-
-    return null;
-}
-
-fn isExecutable(mode: std.fs.File.Mode) bool {
-    if (builtin.os.tag == .windows) return true;
-    return mode & 0o0111 != 0;
-}
-
-// `uname -n` is the *nix equivalent of `hostname.exe` on Windows
-test "expandPath: hostname" {
-    const executable = if (builtin.os.tag == .windows) "hostname.exe" else "uname";
-    const path = (try expandPath(testing.allocator, executable)).?;
-    defer testing.allocator.free(path);
-    try testing.expect(path.len > executable.len);
-}
-
-test "expandPath: does not exist" {
-    const path = try expandPath(testing.allocator, "thisreallyprobablydoesntexist123");
-    try testing.expect(path == null);
-}
-
-test "expandPath: slash" {
-    const path = (try expandPath(testing.allocator, "foo/env")).?;
-    defer testing.allocator.free(path);
-    try testing.expect(path.len == 7);
 }
 
 // Copied from Zig. This is a publicly exported function but there is no
@@ -524,34 +467,35 @@ fn createWindowsEnvBlock(allocator: mem.Allocator, env_map: *const EnvMap) ![]u1
 
 /// Copied from Zig. This function could be made public in child_process.zig instead.
 fn windowsCreateCommandLine(allocator: mem.Allocator, argv: []const []const u8) ![:0]u8 {
-    var buf = std.ArrayList(u8).init(allocator);
+    var buf: std.Io.Writer.Allocating = .init(allocator);
     defer buf.deinit();
+    const writer = &buf.writer;
 
     for (argv, 0..) |arg, arg_i| {
-        if (arg_i != 0) try buf.append(' ');
+        if (arg_i != 0) try writer.writeByte(' ');
         if (mem.indexOfAny(u8, arg, " \t\n\"") == null) {
-            try buf.appendSlice(arg);
+            try writer.writeAll(arg);
             continue;
         }
-        try buf.append('"');
+        try writer.writeByte('"');
         var backslash_count: usize = 0;
         for (arg) |byte| {
             switch (byte) {
                 '\\' => backslash_count += 1,
                 '"' => {
-                    try buf.appendNTimes('\\', backslash_count * 2 + 1);
-                    try buf.append('"');
+                    try writer.splatByteAll('\\', backslash_count * 2 + 1);
+                    try writer.writeByte('"');
                     backslash_count = 0;
                 },
                 else => {
-                    try buf.appendNTimes('\\', backslash_count);
-                    try buf.append(byte);
+                    try writer.splatByteAll('\\', backslash_count);
+                    try writer.writeByte(byte);
                     backslash_count = 0;
                 },
             }
         }
-        try buf.appendNTimes('\\', backslash_count * 2);
-        try buf.append('"');
+        try writer.splatByteAll('\\', backslash_count * 2);
+        try writer.writeByte('"');
     }
 
     return buf.toOwnedSliceSentinel(0);

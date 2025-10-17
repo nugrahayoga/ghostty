@@ -98,7 +98,7 @@ pub const Attribute = union(enum) {
 /// Parser parses the attributes from a list of SGR parameters.
 pub const Parser = struct {
     params: []const u16,
-    params_sep: SepList = SepList.initEmpty(),
+    params_sep: SepList = .initEmpty(),
     idx: usize = 0,
 
     /// Next returns the next attribute or null if there are no more attributes.
@@ -134,7 +134,7 @@ pub const Parser = struct {
                 self.idx += 1;
                 return .{ .unknown = .{
                     .full = self.params,
-                    .partial = slice[0 .. self.idx - start + 1],
+                    .partial = slice[0..@min(self.idx - start + 1, slice.len)],
                 } };
             },
         };
@@ -376,7 +376,7 @@ fn testParse(params: []const u16) Attribute {
 }
 
 fn testParseColon(params: []const u16) Attribute {
-    var p: Parser = .{ .params = params, .params_sep = SepList.initFull() };
+    var p: Parser = .{ .params = params, .params_sep = .initFull() };
     return p.next().?;
 }
 

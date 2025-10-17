@@ -4,24 +4,27 @@ pub fn build(b: *std.Build) !void {
     const optimize = b.standardOptimizeOption(.{});
     const target = b.standardTargetOptions(.{});
 
-    const lib = b.addStaticLibrary(.{
+    const lib = b.addLibrary(.{
         .name = "simdutf",
-        .target = target,
-        .optimize = optimize,
+        .root_module = b.createModule(.{
+            .target = target,
+            .optimize = optimize,
+        }),
+        .linkage = .static,
     });
     lib.linkLibCpp();
     lib.addIncludePath(b.path("vendor"));
 
     if (target.result.os.tag.isDarwin()) {
         const apple_sdk = @import("apple_sdk");
-        try apple_sdk.addPaths(b, lib.root_module);
+        try apple_sdk.addPaths(b, lib);
     }
 
-    var flags = std.ArrayList([]const u8).init(b.allocator);
-    defer flags.deinit();
+    var flags: std.ArrayList([]const u8) = .empty;
+    defer flags.deinit(b.allocator);
     // Zig 0.13 bug: https://github.com/ziglang/zig/issues/20414
     // (See root Ghostty build.zig on why we do this)
-    try flags.appendSlice(&.{"-DSIMDUTF_IMPLEMENTATION_ICELAKE=0"});
+    try flags.appendSlice(b.allocator, &.{"-DSIMDUTF_IMPLEMENTATION_ICELAKE=0"});
 
     lib.addCSourceFiles(.{
         .flags = flags.items,

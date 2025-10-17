@@ -3,6 +3,10 @@
   lib,
   stdenv,
   bashInteractive,
+  doxygen,
+  nushell,
+  appstream,
+  flatpak-builder,
   gdb,
   #, glxinfo # unused
   ncurses,
@@ -14,7 +18,7 @@
   python3,
   qemu,
   scdoc,
-  snapcraft,
+  # snapcraft,
   valgrind,
   #, vulkan-loader # unused
   vttest,
@@ -33,6 +37,7 @@
   gtk4,
   gtk4-layer-shell,
   gobject-introspection,
+  gst_all_1,
   libadwaita,
   blueprint-compiler,
   gettext,
@@ -55,14 +60,22 @@
   jq,
   minisign,
   pandoc,
+  pinact,
   hyperfine,
+  poop,
   typos,
+  shellcheck,
+  uv,
   wayland,
   wayland-scanner,
   wayland-protocols,
   zon2nix,
   system,
   pkgs,
+  # needed by GTK for loading SVG icons while running from within the
+  # developer shell
+  glycin-loaders,
+  librsvg,
 }: let
   # See package.nix. Keep in sync.
   ld_library_path = import ./build-support/ld-library-path.nix {
@@ -77,6 +90,7 @@ in
     packages =
       [
         # For builds
+        doxygen
         jq
         llvmPackages_latest.llvm
         minisign
@@ -94,7 +108,9 @@ in
         # Linting
         nodePackages.prettier
         alejandra
+        pinact
         typos
+        shellcheck
 
         # Testing
         parallel
@@ -108,6 +124,12 @@ in
 
         # Localization
         gettext
+
+        # CI
+        uv
+
+        # Scripting
+        nushell
 
         # We need these GTK-related deps on all platform so we can build
         # dist tarballs.
@@ -124,8 +146,10 @@ in
         # build only has the qemu-system files.
         qemu
 
+        appstream
+        flatpak-builder
         gdb
-        snapcraft
+        # snapcraft
         valgrind
         wraptest
 
@@ -158,6 +182,17 @@ in
         wayland
         wayland-scanner
         wayland-protocols
+        gst_all_1.gstreamer
+        gst_all_1.gst-plugins-base
+        gst_all_1.gst-plugins-good
+
+        # needed by GTK for loading SVG icons while running from within the
+        # developer shell
+        glycin-loaders
+        librsvg
+
+        # for benchmarking
+        poop
       ];
 
     # This should be set onto the rpath of the ghostty binary if you want

@@ -19,8 +19,7 @@ pub fn current(alloc: Allocator, pid: std.os.linux.pid_t) !?[]const u8 {
     defer file.close();
 
     // Read it all into memory -- we don't expect this file to ever be that large.
-    var buf_reader = std.io.bufferedReader(file.reader());
-    const contents = try buf_reader.reader().readAllAlloc(
+    const contents = try file.readToEndAlloc(
         alloc,
         1 * 1024 * 1024, // 1MB
     );
@@ -52,8 +51,31 @@ pub fn create(
         );
         const file = try std.fs.cwd().openFile(pid_path, .{ .mode = .write_only });
         defer file.close();
-        try file.writer().print("{}", .{pid});
+
+        var file_buf: [64]u8 = undefined;
+        var writer = file.writer(&file_buf);
+        try writer.interface.print("{}", .{pid});
+        try writer.interface.flush();
     }
+}
+
+/// Remove a cgroup. This will only succeed if the cgroup is empty
+/// (has no processes). The cgroup path should be relative to the
+/// cgroup root (e.g. "/user.slice/surfaces/abc123.scope").
+pub fn remove(cgroup: []const u8) !void {
+    assert(cgroup.len > 0);
+    assert(cgroup[0] == '/');
+
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const path = try std.fmt.bufPrint(&buf, "/sys/fs/cgroup{s}", .{cgroup});
+    std.fs.cwd().deleteDir(path) catch |err| switch (err) {
+        // If it doesn't exist, that's fine - maybe it was already cleaned up
+        error.FileNotFound => {},
+
+        // Any other error we failed to delete it so we want to notify
+        // the user.
+        else => return err,
+    };
 }
 
 /// Move the given PID into the given cgroup.
@@ -163,8 +185,7 @@ pub fn controllers(alloc: Allocator, cgroup: []const u8) ![]const u8 {
 
     // Read it all into memory -- we don't expect this file to ever
     // be that large.
-    var buf_reader = std.io.bufferedReader(file.reader());
-    const contents = try buf_reader.reader().readAllAlloc(
+    const contents = try file.readToEndAlloc(
         alloc,
         1 * 1024 * 1024, // 1MB
     );
@@ -194,7 +215,10 @@ pub fn configureControllers(
     defer file.close();
 
     // Write
-    try file.writer().writeAll(v);
+    var writer_buf: [4096]u8 = undefined;
+    var writer = file.writer(&writer_buf);
+    try writer.interface.writeAll(v);
+    try writer.interface.flush();
 }
 
 pub const Limit = union(enum) {
@@ -223,5 +247,8 @@ pub fn configureLimit(cgroup: []const u8, limit: Limit) !void {
     defer file.close();
 
     // Write our limit in bytes
-    try file.writer().print("{}", .{size});
+    var writer_buf: [4096]u8 = undefined;
+    var writer = file.writer(&writer_buf);
+    try writer.interface.print("{}", .{size});
+    try writer.interface.flush();
 }

@@ -4,26 +4,28 @@ const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
 const ArenaAllocator = std.heap.ArenaAllocator;
 const internal_os = @import("../os/main.zig");
+const file_load = @import("file_load.zig");
 
-/// Open the configuration in the OS default editor according to the default
-/// paths the main config file could be in.
+/// The path to the configuration that should be opened for editing.
 ///
-/// On Linux, this will open the file at the XDG config path. This is the
+/// On Linux, this will use the file at the XDG config path. This is the
 /// only valid path for Linux so we don't need to check for other paths.
 ///
 /// On macOS, both XDG and AppSupport paths are valid. Because Ghostty
-/// prioritizes AppSupport over XDG, we will open AppSupport if it exists,
+/// prioritizes AppSupport over XDG, we will use AppSupport if it exists,
 /// followed by XDG if it exists, and finally AppSupport if neither exist.
 /// For the existence check, we also prefer non-empty files over empty
 /// files.
-pub fn open(alloc_gpa: Allocator) !void {
+///
+/// The returned value is allocated using the provided allocator.
+pub fn openPath(alloc_gpa: Allocator) ![:0]const u8 {
     // Use an arena to make memory management easier in here.
     var arena = ArenaAllocator.init(alloc_gpa);
     defer arena.deinit();
-    const alloc = arena.allocator();
+    const alloc_arena = arena.allocator();
 
     // Get the path we should open
-    const config_path = try configPath(alloc);
+    const config_path = try configPath(alloc_arena);
 
     // Create config directory recursively.
     if (std.fs.path.dirname(config_path)) |config_dir| {
@@ -41,7 +43,7 @@ pub fn open(alloc_gpa: Allocator) !void {
         }
     };
 
-    try internal_os.open(alloc, .text, config_path);
+    return try alloc_gpa.dupeZ(u8, config_path);
 }
 
 /// Returns the config path to use for open for the current OS.
@@ -88,20 +90,16 @@ fn configPath(alloc_arena: Allocator) ![]const u8 {
 /// Returns a const list of possible paths the main config file could be
 /// in for the current OS.
 fn configPathCandidates(alloc_arena: Allocator) ![]const []const u8 {
-    var paths = try std.ArrayList([]const u8).initCapacity(alloc_arena, 2);
-    errdefer paths.deinit();
+    var paths: std.ArrayList([]const u8) = try .initCapacity(alloc_arena, 4);
+    errdefer paths.deinit(alloc_arena);
 
     if (comptime builtin.os.tag == .macos) {
-        paths.appendAssumeCapacity(try internal_os.macos.appSupportDir(
-            alloc_arena,
-            "config",
-        ));
+        paths.appendAssumeCapacity(try file_load.defaultAppSupportPath(alloc_arena));
+        paths.appendAssumeCapacity(try file_load.legacyDefaultAppSupportPath(alloc_arena));
     }
 
-    paths.appendAssumeCapacity(try internal_os.xdg.config(
-        alloc_arena,
-        .{ .subdir = "ghostty/config" },
-    ));
+    paths.appendAssumeCapacity(try file_load.defaultXdgPath(alloc_arena));
+    paths.appendAssumeCapacity(try file_load.legacyDefaultXdgPath(alloc_arena));
 
     return paths.items;
 }

@@ -11,11 +11,14 @@ pub fn build(b: *std.Build) !void {
         .optimize = optimize,
     });
 
-    const imgui = b.dependency("imgui", .{});
-    const lib = b.addStaticLibrary(.{
+    const imgui_ = b.lazyDependency("imgui", .{});
+    const lib = b.addLibrary(.{
         .name = "cimgui",
-        .target = target,
-        .optimize = optimize,
+        .root_module = b.createModule(.{
+            .target = target,
+            .optimize = optimize,
+        }),
+        .linkage = .static,
     });
     lib.linkLibC();
     lib.linkLibCpp();
@@ -49,53 +52,53 @@ pub fn build(b: *std.Build) !void {
         }
     }
 
-    lib.addIncludePath(imgui.path(""));
+    if (imgui_) |imgui| lib.addIncludePath(imgui.path(""));
     module.addIncludePath(b.path("vendor"));
 
-    var flags = std.ArrayList([]const u8).init(b.allocator);
-    defer flags.deinit();
-    try flags.appendSlice(&.{
+    var flags: std.ArrayList([]const u8) = .empty;
+    defer flags.deinit(b.allocator);
+    try flags.appendSlice(b.allocator, &.{
         "-DCIMGUI_FREETYPE=1",
         "-DIMGUI_USE_WCHAR32=1",
         "-DIMGUI_DISABLE_OBSOLETE_FUNCTIONS=1",
     });
     if (target.result.os.tag == .windows) {
-        try flags.appendSlice(&.{
+        try flags.appendSlice(b.allocator, &.{
             "-DIMGUI_IMPL_API=extern\t\"C\"\t__declspec(dllexport)",
         });
     } else {
-        try flags.appendSlice(&.{
+        try flags.appendSlice(b.allocator, &.{
             "-DIMGUI_IMPL_API=extern\t\"C\"",
         });
     }
 
-    lib.addCSourceFile(.{ .file = b.path("vendor/cimgui.cpp"), .flags = flags.items });
-    lib.addCSourceFile(.{ .file = imgui.path("imgui.cpp"), .flags = flags.items });
-    lib.addCSourceFile(.{ .file = imgui.path("imgui_draw.cpp"), .flags = flags.items });
-    lib.addCSourceFile(.{ .file = imgui.path("imgui_demo.cpp"), .flags = flags.items });
-    lib.addCSourceFile(.{ .file = imgui.path("imgui_widgets.cpp"), .flags = flags.items });
-    lib.addCSourceFile(.{ .file = imgui.path("imgui_tables.cpp"), .flags = flags.items });
-    lib.addCSourceFile(.{ .file = imgui.path("misc/freetype/imgui_freetype.cpp"), .flags = flags.items });
-
-    lib.addCSourceFile(.{
-        .file = imgui.path("backends/imgui_impl_opengl3.cpp"),
-        .flags = flags.items,
-    });
-
-    if (target.result.os.tag.isDarwin()) {
-        if (!target.query.isNative()) {
-            try @import("apple_sdk").addPaths(b, lib.root_module);
-            try @import("apple_sdk").addPaths(b, module);
-        }
+    if (imgui_) |imgui| {
+        lib.addCSourceFile(.{ .file = b.path("vendor/cimgui.cpp"), .flags = flags.items });
+        lib.addCSourceFile(.{ .file = imgui.path("imgui.cpp"), .flags = flags.items });
+        lib.addCSourceFile(.{ .file = imgui.path("imgui_draw.cpp"), .flags = flags.items });
+        lib.addCSourceFile(.{ .file = imgui.path("imgui_demo.cpp"), .flags = flags.items });
+        lib.addCSourceFile(.{ .file = imgui.path("imgui_widgets.cpp"), .flags = flags.items });
+        lib.addCSourceFile(.{ .file = imgui.path("imgui_tables.cpp"), .flags = flags.items });
+        lib.addCSourceFile(.{ .file = imgui.path("misc/freetype/imgui_freetype.cpp"), .flags = flags.items });
         lib.addCSourceFile(.{
-            .file = imgui.path("backends/imgui_impl_metal.mm"),
+            .file = imgui.path("backends/imgui_impl_opengl3.cpp"),
             .flags = flags.items,
         });
-        if (target.result.os.tag == .macos) {
+
+        if (target.result.os.tag.isDarwin()) {
+            if (!target.query.isNative()) {
+                try @import("apple_sdk").addPaths(b, lib);
+            }
             lib.addCSourceFile(.{
-                .file = imgui.path("backends/imgui_impl_osx.mm"),
+                .file = imgui.path("backends/imgui_impl_metal.mm"),
                 .flags = flags.items,
             });
+            if (target.result.os.tag == .macos) {
+                lib.addCSourceFile(.{
+                    .file = imgui.path("backends/imgui_impl_osx.mm"),
+                    .flags = flags.items,
+                });
+            }
         }
     }
 
@@ -109,9 +112,11 @@ pub fn build(b: *std.Build) !void {
 
     const test_exe = b.addTest(.{
         .name = "test",
-        .root_source_file = b.path("main.zig"),
-        .target = target,
-        .optimize = optimize,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("main.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
     });
     test_exe.linkLibrary(lib);
     const tests_run = b.addRunArtifact(test_exe);

@@ -1,9 +1,10 @@
 const GhosttyI18n = @This();
 
 const std = @import("std");
+const builtin = @import("builtin");
 const Config = @import("Config.zig");
-const gresource = @import("../apprt/gtk/gresource.zig");
-const internal_os = @import("../os/main.zig");
+const gresource = @import("../apprt/gtk/build/gresource.zig");
+const locales = @import("../os/i18n_locales.zig").locales;
 
 const domain = "com.mitchellh.ghostty";
 
@@ -17,18 +18,26 @@ update_step: *std.Build.Step,
 pub fn init(b: *std.Build, cfg: *const Config) !GhosttyI18n {
     _ = cfg;
 
-    var steps = std.ArrayList(*std.Build.Step).init(b.allocator);
-    defer steps.deinit();
+    var steps: std.ArrayList(*std.Build.Step) = .empty;
+    defer steps.deinit(b.allocator);
 
-    inline for (internal_os.i18n.locales) |locale| {
+    inline for (locales) |locale| {
+        // There is no encoding suffix in the LC_MESSAGES path on FreeBSD,
+        // so we need to remove it from `locale` to have a correct destination string.
+        // (/usr/local/share/locale/en_AU/LC_MESSAGES)
+        const target_locale = comptime if (builtin.target.os.tag == .freebsd)
+            std.mem.trimRight(u8, locale, ".UTF-8")
+        else
+            locale;
+
         const msgfmt = b.addSystemCommand(&.{ "msgfmt", "-o", "-" });
         msgfmt.addFileArg(b.path("po/" ++ locale ++ ".po"));
 
-        try steps.append(&b.addInstallFile(
+        try steps.append(b.allocator, &b.addInstallFile(
             msgfmt.captureStdOut(),
             std.fmt.comptimePrint(
                 "share/locale/{s}/LC_MESSAGES/{s}.mo",
-                .{ locale, domain },
+                .{ target_locale, domain },
             ),
         ).step);
     }
@@ -36,12 +45,19 @@ pub fn init(b: *std.Build, cfg: *const Config) !GhosttyI18n {
     return .{
         .owner = b,
         .update_step = try createUpdateStep(b),
-        .steps = try steps.toOwnedSlice(),
+        .steps = try steps.toOwnedSlice(b.allocator),
     };
 }
 
 pub fn install(self: *const GhosttyI18n) void {
-    for (self.steps) |step| self.owner.getInstallStep().dependOn(step);
+    self.addStepDependencies(self.owner.getInstallStep());
+}
+
+pub fn addStepDependencies(
+    self: *const GhosttyI18n,
+    other_step: *std.Build.Step,
+) void {
+    for (self.steps) |step| other_step.dependOn(step);
 }
 
 fn createUpdateStep(b: *std.Build) !*std.Build.Step {
@@ -54,7 +70,7 @@ fn createUpdateStep(b: *std.Build) !*std.Build.Step {
         "--keyword=C_:1c,2",
         "--package-name=" ++ domain,
         "--msgid-bugs-address=m@mitchellh.com",
-        "--copyright-holder=Mitchell Hashimoto",
+        "--copyright-holder=\"Mitchell Hashimoto, Ghostty contributors\"",
         "-o",
         "-",
     });
@@ -62,25 +78,39 @@ fn createUpdateStep(b: *std.Build) !*std.Build.Step {
     // Not cacheable due to the gresource files
     xgettext.has_side_effects = true;
 
-    inline for (gresource.blueprint_files) |blp| {
-        // We avoid using addFileArg here since the full, absolute file path
-        // would be added to the file as its location, which differs for
-        // everyone's checkout of the repository.
-        // This comes at a cost of losing per-file caching, of course.
-        xgettext.addArg(std.fmt.comptimePrint(
+    inline for (gresource.blueprints) |blp| {
+        const path = std.fmt.comptimePrint(
             "src/apprt/gtk/ui/{[major]}.{[minor]}/{[name]s}.blp",
             blp,
-        ));
+        );
+        // The arguments to xgettext must be the relative path in the build root
+        // or the resulting files will contain the absolute path. This will cause
+        // a lot of churn because not everyone has the Ghostty code checked out in
+        // exactly the same location.
+        xgettext.addArg(path);
+        // Mark the file as an input so that the Zig build system caching will work.
+        xgettext.addFileInput(b.path(path));
     }
 
     {
-        var gtk_files = try b.build_root.handle.openDir(
+        // Iterate over all of the files underneath `src/apprt/gtk`. We store
+        // them in an array so that they can be sorted into a determininistic
+        // order. That will minimize code churn as directory walking is not
+        // guaranteed to happen in any particular order.
+
+        var gtk_files: std.ArrayListUnmanaged([]const u8) = .empty;
+        defer {
+            for (gtk_files.items) |item| b.allocator.free(item);
+            gtk_files.deinit(b.allocator);
+        }
+
+        var gtk_dir = try b.build_root.handle.openDir(
             "src/apprt/gtk",
             .{ .iterate = true },
         );
-        defer gtk_files.close();
+        defer gtk_dir.close();
 
-        var walk = try gtk_files.walk(b.allocator);
+        var walk = try gtk_dir.walk(b.allocator);
         defer walk.deinit();
         while (try walk.next()) |src| {
             switch (src.kind) {
@@ -93,7 +123,29 @@ fn createUpdateStep(b: *std.Build) !*std.Build.Step {
                 else => continue,
             }
 
-            xgettext.addArg((b.pathJoin(&.{ "src/apprt/gtk", src.path })));
+            try gtk_files.append(b.allocator, try b.allocator.dupe(u8, src.path));
+        }
+
+        std.mem.sort(
+            []const u8,
+            gtk_files.items,
+            {},
+            struct {
+                fn lt(_: void, lhs: []const u8, rhs: []const u8) bool {
+                    return std.mem.order(u8, lhs, rhs) == .lt;
+                }
+            }.lt,
+        );
+
+        for (gtk_files.items) |item| {
+            const path = b.pathJoin(&.{ "src/apprt/gtk", item });
+            // The arguments to xgettext must be the relative path in the build root
+            // or the resulting files will contain the absolute path. This will
+            // cause a lot of churn because not everyone has the Ghostty code
+            // checked out in exactly the same location.
+            xgettext.addArg(path);
+            // Mark the file as an input so that the Zig build system caching will work.
+            xgettext.addFileInput(b.path(path));
         }
     }
 
@@ -103,8 +155,8 @@ fn createUpdateStep(b: *std.Build) !*std.Build.Step {
         "po/" ++ domain ++ ".pot",
     );
 
-    inline for (internal_os.i18n.locales) |locale| {
-        const msgmerge = b.addSystemCommand(&.{ "msgmerge", "-q" });
+    inline for (locales) |locale| {
+        const msgmerge = b.addSystemCommand(&.{ "msgmerge", "--quiet", "--no-fuzzy-matching" });
         msgmerge.addFileArg(b.path("po/" ++ locale ++ ".po"));
         msgmerge.addFileArg(xgettext.captureStdOut());
         usf.addCopyFileToSource(msgmerge.captureStdOut(), "po/" ++ locale ++ ".po");

@@ -131,12 +131,11 @@ which should be filled in accordingly. You can then add your translations
 within the newly created translation file.
 
 Afterwards, you need to update the list of known locales within Ghostty's
-build system. To do so, open `src/os/i18n.zig` and find the list
-of locales under the `locales` variable, then add the full locale name
-into the list.
+build system. To do so, open `src/os/i18n_locales.zig` and find the list
+of locales after the comments, then add the full locale name into the list.
 
 The order matters, so make sure to place your locale in the correct position.
-Read the comment above the variable for more details on the order. If you're
+Read the comments present in the file for more details on the order. If you're
 unsure, place it at the end of the list.
 
 ```zig
@@ -146,7 +145,19 @@ const locales = [_][]const u8{
 }
 ```
 
-You should then be able to run `zig build` and see your translations in action.
+You should then be able to run `zig build` and see your translations in action!
+
+Before opening a pull request with the new translation file, you should also add
+your locale to the `CODEOWNERS` file. Find the `# Localization` section near the
+bottom and add a line like so (where `xx_YY` is your locale):
+
+```diff
+ # Localization
+ /po/README_TRANSLATORS.md @ghostty-org/localization
+ /po/com.mitchellh.ghostty.pot @ghostty-org/localization
+ /po/zh_CN.UTF-8.po @ghostty-org/zh_CN
++/po/xx_YY.UTF-8.po @ghostty-org/xx_YY
+```
 
 ## Style Guide
 

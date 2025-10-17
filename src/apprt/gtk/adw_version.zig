@@ -27,7 +27,7 @@ pub fn getRuntimeVersion() std.SemanticVersion {
 }
 
 pub fn logVersion() void {
-    log.info("libadwaita version build={} runtime={}", .{
+    log.info("libadwaita version build={f} runtime={f}", .{
         comptime_version,
         getRuntimeVersion(),
     });
@@ -106,6 +106,10 @@ pub inline fn supportsDialogs() bool {
 }
 
 pub inline fn supportsTabOverview() bool {
+    return atLeast(1, 4, 0);
+}
+
+pub inline fn supportsSwitchRow() bool {
     return atLeast(1, 4, 0);
 }
 

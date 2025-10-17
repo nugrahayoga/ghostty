@@ -13,7 +13,7 @@ const CodepointResolver = @This();
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const ziglyph = @import("ziglyph");
+const uucode = @import("uucode");
 const font = @import("main.zig");
 const Atlas = font.Atlas;
 const CodepointMap = font.CodepointMap;
@@ -37,7 +37,7 @@ collection: Collection,
 
 /// The set of statuses and whether they're enabled or not. This defaults
 /// to true. This can be changed at runtime with no ill effect.
-styles: StyleStatus = StyleStatus.initFill(true),
+styles: StyleStatus = .initFill(true),
 
 /// If discovery is available, we'll look up fonts where we can't find
 /// the codepoint. This can be set after initialization.
@@ -140,7 +140,7 @@ pub fn getIndex(
     // handle this.
     if (self.sprite) |sprite| {
         if (sprite.hasCodepoint(cp, p)) {
-            return Collection.Index.initSpecial(.sprite);
+            return .initSpecial(.sprite);
         }
     }
 
@@ -150,7 +150,7 @@ pub fn getIndex(
     // we'll do this multiple times if we recurse, but this is a cached function
     // call higher up (GroupCache) so this should be rare.
     const p_mode: Collection.PresentationMode = if (p) |v| .{ .explicit = v } else .{
-        .default = if (ziglyph.emoji.isEmojiPresentation(@intCast(cp)))
+        .default = if (uucode.get(.is_emoji_presentation, @intCast(cp)))
             .emoji
         else
             .text,
@@ -190,7 +190,10 @@ pub fn getIndex(
                 // Discovery is supposed to only return faces that have our
                 // codepoint but we can't search presentation in discovery so
                 // we have to check it here.
-                const face: Collection.Entry = .{ .fallback_deferred = deferred_face };
+                const face: Collection.Entry = .{
+                    .face = .{ .deferred = deferred_face },
+                    .fallback = true,
+                };
                 if (!face.hasCodepoint(cp, p_mode)) {
                     deferred_face.deinit();
                     continue;
@@ -201,7 +204,11 @@ pub fn getIndex(
                     cp,
                     deferred_face.name(&buf) catch "<error>",
                 });
-                return self.collection.add(alloc, style, face) catch {
+                return self.collection.addDeferred(alloc, deferred_face, .{
+                    .style = style,
+                    .fallback = true,
+                    .size_adjustment = font.default_fallback_adjustment,
+                }) catch {
                     deferred_face.deinit();
                     break :discover;
                 };
@@ -263,11 +270,11 @@ fn getIndexCodepointOverride(
 
         // Add the font to our list of fonts so we can get an index for it,
         // and ensure the index is stored in the descriptor cache for next time.
-        const idx = try self.collection.add(
-            alloc,
-            .regular,
-            .{ .deferred = face },
-        );
+        const idx = try self.collection.addDeferred(alloc, face, .{
+            .style = .regular,
+            .fallback = false,
+            .size_adjustment = font.default_fallback_adjustment,
+        });
         try self.descriptor_cache.put(alloc, desc, idx);
 
         break :idx idx;
@@ -380,7 +387,7 @@ test getIndex {
     const testEmoji = font.embedded.emoji;
     const testEmojiText = font.embedded.emoji_text;
 
-    var lib = try Library.init();
+    var lib = try Library.init(alloc);
     defer lib.deinit();
 
     var c = Collection.init();
@@ -388,32 +395,36 @@ test getIndex {
 
     {
         errdefer c.deinit(alloc);
-        _ = try c.add(alloc, .regular, .{ .loaded = try Face.init(
+        _ = try c.add(alloc, try .init(
             lib,
             testFont,
             .{ .size = .{ .points = 12, .xdpi = 96, .ydpi = 96 } },
-        ) });
+        ), .{
+            .style = .regular,
+            .fallback = false,
+            .size_adjustment = .none,
+        });
         if (comptime !font.options.backend.hasCoretext()) {
             // Coretext doesn't support Noto's format
-            _ = try c.add(
-                alloc,
-                .regular,
-                .{ .loaded = try Face.init(
-                    lib,
-                    testEmoji,
-                    .{ .size = .{ .points = 12 } },
-                ) },
-            );
-        }
-        _ = try c.add(
-            alloc,
-            .regular,
-            .{ .loaded = try Face.init(
+            _ = try c.add(alloc, try .init(
                 lib,
-                testEmojiText,
+                testEmoji,
                 .{ .size = .{ .points = 12 } },
-            ) },
-        );
+            ), .{
+                .style = .regular,
+                .fallback = false,
+                .size_adjustment = .none,
+            });
+        }
+        _ = try c.add(alloc, try .init(
+            lib,
+            testEmojiText,
+            .{ .size = .{ .points = 12 } },
+        ), .{
+            .style = .regular,
+            .fallback = false,
+            .size_adjustment = .none,
+        });
     }
 
     var r: CodepointResolver = .{ .collection = c };
@@ -461,27 +472,39 @@ test "getIndex disabled font style" {
     var atlas_grayscale = try font.Atlas.init(alloc, 512, .grayscale);
     defer atlas_grayscale.deinit(alloc);
 
-    var lib = try Library.init();
+    var lib = try Library.init(alloc);
     defer lib.deinit();
 
     var c = Collection.init();
     c.load_options = .{ .library = lib };
 
-    _ = try c.add(alloc, .regular, .{ .loaded = try Face.init(
+    _ = try c.add(alloc, try .init(
         lib,
         testFont,
         .{ .size = .{ .points = 12, .xdpi = 96, .ydpi = 96 } },
-    ) });
-    _ = try c.add(alloc, .bold, .{ .loaded = try Face.init(
+    ), .{
+        .style = .regular,
+        .fallback = false,
+        .size_adjustment = .none,
+    });
+    _ = try c.add(alloc, try .init(
         lib,
         testFont,
         .{ .size = .{ .points = 12, .xdpi = 96, .ydpi = 96 } },
-    ) });
-    _ = try c.add(alloc, .italic, .{ .loaded = try Face.init(
+    ), .{
+        .style = .bold,
+        .fallback = false,
+        .size_adjustment = .none,
+    });
+    _ = try c.add(alloc, try .init(
         lib,
         testFont,
         .{ .size = .{ .points = 12, .xdpi = 96, .ydpi = 96 } },
-    ) });
+    ), .{
+        .style = .italic,
+        .fallback = false,
+        .size_adjustment = .none,
+    });
 
     var r: CodepointResolver = .{ .collection = c };
     defer r.deinit(alloc);
@@ -513,7 +536,7 @@ test "getIndex box glyph" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var lib = try Library.init();
+    var lib = try Library.init(alloc);
     defer lib.deinit();
 
     const c = Collection.init();
@@ -522,6 +545,7 @@ test "getIndex box glyph" {
         .collection = c,
         .sprite = .{
             .metrics = font.Metrics.calc(.{
+                .px_per_em = 30.0,
                 .cell_width = 18.0,
                 .ascent = 30.0,
                 .descent = -6.0,

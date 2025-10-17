@@ -7,7 +7,7 @@ const gdk = @import("gdk");
 const Config = @import("../../config.zig").Config;
 const input = @import("../../input.zig");
 const key = @import("key.zig");
-const ApprtWindow = @import("Window.zig");
+const ApprtWindow = @import("class/window.zig").Window;
 
 pub const noop = @import("winproto/noop.zig");
 pub const x11 = @import("winproto/x11.zig");
@@ -144,6 +144,12 @@ pub const Window = union(Protocol) {
     pub fn addSubprocessEnv(self: *Window, env: *std.process.EnvMap) !void {
         switch (self.*) {
             inline else => |*v| try v.addSubprocessEnv(env),
+        }
+    }
+
+    pub fn setUrgent(self: *Window, urgent: bool) !void {
+        switch (self.*) {
+            inline else => |*v| try v.setUrgent(urgent),
         }
     }
 };

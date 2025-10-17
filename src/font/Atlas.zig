@@ -50,15 +50,18 @@ modified: std.atomic.Value(usize) = .{ .raw = 0 },
 resized: std.atomic.Value(usize) = .{ .raw = 0 },
 
 pub const Format = enum(u8) {
+    /// 1 byte per pixel grayscale.
     grayscale = 0,
-    rgb = 1,
-    rgba = 2,
+    /// 3 bytes per pixel BGR.
+    bgr = 1,
+    /// 4 bytes per pixel BGRA.
+    bgra = 2,
 
     pub fn depth(self: Format) u8 {
         return switch (self) {
             .grayscale => 1,
-            .rgb => 3,
-            .rgba => 4,
+            .bgr => 3,
+            .bgra => 4,
         };
     }
 };
@@ -83,6 +86,11 @@ pub const Region = extern struct {
     height: u32,
 };
 
+/// Number of nodes to preallocate in the list on init.
+///
+/// TODO: figure out optimal prealloc based on real world usage
+const node_prealloc: usize = 64;
+
 pub fn init(alloc: Allocator, size: u32, format: Format) Allocator.Error!Atlas {
     var result = Atlas{
         .data = try alloc.alloc(u8, size * size * format.depth()),
@@ -92,8 +100,8 @@ pub fn init(alloc: Allocator, size: u32, format: Format) Allocator.Error!Atlas {
     };
     errdefer result.deinit(alloc);
 
-    // TODO: figure out optimal prealloc based on real world usage
-    try result.nodes.ensureUnusedCapacity(alloc, 64);
+    // Prealloc some nodes.
+    result.nodes = try .initCapacity(alloc, node_prealloc);
 
     // This sets up our initial state
     result.clear();
@@ -248,35 +256,66 @@ pub fn set(self: *Atlas, reg: Region, data: []const u8) void {
     _ = self.modified.fetchAdd(1, .monotonic);
 }
 
+/// Like `set` but allows specifying a width for the source data and an
+/// offset x and y, so that a section of a larger buffer may be copied
+/// in to the atlas.
+pub fn setFromLarger(
+    self: *Atlas,
+    reg: Region,
+    src: []const u8,
+    src_width: u32,
+    src_x: u32,
+    src_y: u32,
+) void {
+    assert(reg.x < (self.size - 1));
+    assert((reg.x + reg.width) <= (self.size - 1));
+    assert(reg.y < (self.size - 1));
+    assert((reg.y + reg.height) <= (self.size - 1));
+
+    const depth = self.format.depth();
+    var i: u32 = 0;
+    while (i < reg.height) : (i += 1) {
+        const tex_offset = (((reg.y + i) * self.size) + reg.x) * depth;
+        const src_offset = (((src_y + i) * src_width) + src_x) * depth;
+        fastmem.copy(
+            u8,
+            self.data[tex_offset..],
+            src[src_offset .. src_offset + (reg.width * depth)],
+        );
+    }
+
+    _ = self.modified.fetchAdd(1, .monotonic);
+}
+
 // Grow the texture to the new size, preserving all previously written data.
 pub fn grow(self: *Atlas, alloc: Allocator, size_new: u32) Allocator.Error!void {
     assert(size_new >= self.size);
     if (size_new == self.size) return;
 
-    // Preserve our old values so we can copy the old data
+    // We reserve space ahead of time for the new node, so that we
+    // won't have to handle any errors after allocating our new data.
+    try self.nodes.ensureUnusedCapacity(alloc, 1);
+
+    const data_new = try alloc.alloc(
+        u8,
+        size_new * size_new * self.format.depth(),
+    );
+
+    // Function is infallible from this point.
+    errdefer comptime unreachable;
+
+    // Keep track of our old data so that we can copy it.
     const data_old = self.data;
     const size_old = self.size;
 
-    // Allocate our new data
-    self.data = try alloc.alloc(u8, size_new * size_new * self.format.depth());
-    defer alloc.free(data_old);
-    errdefer {
-        alloc.free(self.data);
-        self.data = data_old;
-    }
-
-    // Add our new rectangle for our added righthand space. We do this
-    // right away since its the only operation that can fail and we want
-    // to make error cleanup easier.
-    try self.nodes.append(alloc, .{
-        .x = size_old - 1,
-        .y = 1,
-        .width = size_new - size_old,
-    });
-
-    // If our allocation and rectangle add succeeded, we can go ahead
-    // and persist our new size and copy over the old data.
+    // Update our data and size to our new ones.
+    self.data = data_new;
     self.size = size_new;
+
+    // Free the old data once we're done with it.
+    defer alloc.free(data_old);
+
+    // Zero the new data out and copy the old data over.
     @memset(self.data, 0);
     self.set(.{
         .x = 0, // don't bother skipping border so we can avoid strides
@@ -284,6 +323,13 @@ pub fn grow(self: *Atlas, alloc: Allocator, size_new: u32) Allocator.Error!void 
         .width = size_old,
         .height = size_old - 2, // skip the last border row
     }, data_old[size_old * self.format.depth() ..]);
+
+    // Add the new rectangle for our added righthand space.
+    self.nodes.appendAssumeCapacity(.{
+        .x = size_old - 1,
+        .y = 1,
+        .width = size_new - size_old,
+    });
 
     // We are both modified and resized
     _ = self.modified.fetchAdd(1, .monotonic);
@@ -303,8 +349,13 @@ pub fn clear(self: *Atlas) void {
 }
 
 /// Dump the atlas as a PPM to a writer, for debug purposes.
-/// Only supports grayscale and rgb atlases.
-pub fn dump(self: Atlas, writer: anytype) !void {
+/// Only supports grayscale and bgr atlases.
+///
+/// NOTE: BGR atlases will have the red and blue channels
+///       swapped because PPM expects RGB. This would be
+///       easy enough to fix so next time someone needs
+///       to debug a color atlas they should fix it.
+pub fn dump(self: Atlas, writer: *std.Io.Writer) !void {
     try writer.print(
         \\P{c}
         \\{d} {d}
@@ -313,7 +364,7 @@ pub fn dump(self: Atlas, writer: anytype) !void {
     , .{
         @as(u8, switch (self.format) {
             .grayscale => '5',
-            .rgb => '6',
+            .bgr => '6',
             else => {
                 log.err("Unsupported format for dump: {}", .{self.format});
                 @panic("Cannot dump this atlas format.");
@@ -418,8 +469,16 @@ pub const Wasm = struct {
 
         // We need to draw pixels so this is format dependent.
         const buf: []u8 = switch (self.format) {
-            // RGBA is the native ImageData format
-            .rgba => self.data,
+            .bgra => buf: {
+                // Convert from BGRA to RGBA by swapping every R and B.
+                var buf: []u8 = try alloc.dupe(u8, self.data);
+                errdefer alloc.free(buf);
+                var i: usize = 0;
+                while (i < self.data.len) : (i += 4) {
+                    std.mem.swap(u8, &buf[i], &buf[i + 2]);
+                }
+                break :buf buf;
+            },
 
             .grayscale => buf: {
                 // Convert from A8 to RGBA so every 4th byte is set to a value.
@@ -540,6 +599,35 @@ test "writing data" {
     try testing.expectEqual(@as(u8, 4), atlas.data[66]);
 }
 
+test "writing data from a larger source" {
+    const alloc = testing.allocator;
+    var atlas = try init(alloc, 32, .grayscale);
+    defer atlas.deinit(alloc);
+
+    const reg = try atlas.reserve(alloc, 2, 2);
+    const old = atlas.modified.load(.monotonic);
+    // zig fmt: off
+    atlas.setFromLarger(reg, &[_]u8{
+        8, 8, 8, 8, 8,
+        8, 8, 1, 2, 8,
+        8, 8, 3, 4, 8,
+        8, 8, 8, 8, 8,
+    }, 5, 2, 1);
+    // zig fmt: on
+    const new = atlas.modified.load(.monotonic);
+    try testing.expect(new > old);
+
+    // 33 because of the 1px border and so on
+    try testing.expectEqual(@as(u8, 1), atlas.data[33]);
+    try testing.expectEqual(@as(u8, 2), atlas.data[34]);
+    try testing.expectEqual(@as(u8, 3), atlas.data[65]);
+    try testing.expectEqual(@as(u8, 4), atlas.data[66]);
+
+    // None of the `8`s from the source data outside of the
+    // specified region should have made it on to the atlas.
+    try testing.expectEqual(null, std.mem.indexOfScalar(u8, atlas.data, 8));
+}
+
 test "grow" {
     const alloc = testing.allocator;
     var atlas = try init(alloc, 4, .grayscale); // +2 for 1px border
@@ -572,12 +660,12 @@ test "grow" {
     try testing.expectEqual(@as(u8, 4), atlas.data[atlas.size * 2 + 2]);
 }
 
-test "writing RGB data" {
+test "writing BGR data" {
     const alloc = testing.allocator;
-    var atlas = try init(alloc, 32, .rgb);
+    var atlas = try init(alloc, 32, .bgr);
     defer atlas.deinit(alloc);
 
-    // This is RGB so its 3 bpp
+    // This is BGR so its 3 bpp
     const reg = try atlas.reserve(alloc, 1, 2);
     atlas.set(reg, &[_]u8{
         1, 2, 3,
@@ -594,18 +682,18 @@ test "writing RGB data" {
     try testing.expectEqual(@as(u8, 6), atlas.data[65 * depth + 2]);
 }
 
-test "grow RGB" {
+test "grow BGR" {
     const alloc = testing.allocator;
 
     // Atlas is 4x4 so its a 1px border meaning we only have 2x2 available
-    var atlas = try init(alloc, 4, .rgb);
+    var atlas = try init(alloc, 4, .bgr);
     defer atlas.deinit(alloc);
 
     // Get our 2x2, which should be ALL our usable space
     const reg = try atlas.reserve(alloc, 2, 2);
     try testing.expectError(Error.AtlasFull, atlas.reserve(alloc, 1, 1));
 
-    // This is RGB so its 3 bpp
+    // This is BGR so its 3 bpp
     atlas.set(reg, &[_]u8{
         10, 11, 12, // (0, 0) (x, y) from top-left
         13, 14, 15, // (1, 0)
@@ -660,4 +748,50 @@ test "grow RGB" {
     _ = try atlas.reserve(alloc, 1, 3);
     _ = try atlas.reserve(alloc, 2, 1);
     try testing.expectError(Error.AtlasFull, atlas.reserve(alloc, 1, 1));
+}
+
+test "grow OOM" {
+    // We use a fixed buffer allocator so that we can consistently hit OOM.
+    //
+    // We calculate the size to exactly fit the 4x4 pixels and node list.
+    var buf: [
+        4 * 4 * 1 // 4x4 pixels, each 1 byte.
+        + node_prealloc * @sizeOf(Node) // preallocated nodes.
+    ]u8 = undefined;
+    var fba: std.heap.FixedBufferAllocator = .init(&buf);
+    const alloc = fba.allocator();
+
+    var atlas = try init(alloc, 4, .grayscale); // +2 for 1px border
+    defer atlas.deinit(alloc);
+
+    const reg = try atlas.reserve(alloc, 2, 2);
+    try testing.expectError(
+        Error.AtlasFull,
+        atlas.reserve(alloc, 1, 1),
+    );
+
+    // Write some data so we can verify that attempted growing doesn't mess it up.
+    atlas.set(reg, &[_]u8{ 1, 2, 3, 4 });
+    try testing.expectEqual(@as(u8, 1), atlas.data[5]);
+    try testing.expectEqual(@as(u8, 2), atlas.data[6]);
+    try testing.expectEqual(@as(u8, 3), atlas.data[9]);
+    try testing.expectEqual(@as(u8, 4), atlas.data[10]);
+
+    // Expand by 1, should give OOM, modified and resized should be unchanged.
+    const old_modified = atlas.modified.load(.monotonic);
+    const old_resized = atlas.resized.load(.monotonic);
+    try testing.expectError(
+        Allocator.Error.OutOfMemory,
+        atlas.grow(alloc, atlas.size + 1),
+    );
+    const new_modified = atlas.modified.load(.monotonic);
+    const new_resized = atlas.resized.load(.monotonic);
+    try testing.expectEqual(old_modified, new_modified);
+    try testing.expectEqual(old_resized, new_resized);
+
+    // Ensure our data is still set.
+    try testing.expectEqual(@as(u8, 1), atlas.data[5]);
+    try testing.expectEqual(@as(u8, 2), atlas.data[6]);
+    try testing.expectEqual(@as(u8, 3), atlas.data[9]);
+    try testing.expectEqual(@as(u8, 4), atlas.data[10]);
 }

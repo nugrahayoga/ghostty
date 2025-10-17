@@ -1,7 +1,7 @@
 const Screen = @This();
 
 const std = @import("std");
-const build_config = @import("../build_config.zig");
+const build_options = @import("terminal_options");
 const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
 const ansi = @import("ansi.zig");
@@ -23,6 +23,8 @@ const Page = pagepkg.Page;
 const Row = pagepkg.Row;
 const Cell = pagepkg.Cell;
 const Pin = PageList.Pin;
+
+pub const CursorStyle = @import("cursor.zig").Style;
 
 const log = std.log.scoped(.screen);
 
@@ -64,7 +66,10 @@ protected_mode: ansi.ProtectedMode = .off,
 kitty_keyboard: kitty.KeyFlagStack = .{},
 
 /// Kitty graphics protocol state.
-kitty_images: kitty.graphics.ImageStorage = .{},
+kitty_images: if (build_options.kitty_graphics)
+    kitty.graphics.ImageStorage
+else
+    struct {} = .{},
 
 /// Dirty flags for the renderer.
 dirty: Dirty = .{},
@@ -141,22 +146,6 @@ pub const Cursor = struct {
     }
 };
 
-/// The visual style of the cursor. Whether or not it blinks
-/// is determined by mode 12 (modes.zig). This mode is synchronized
-/// with CSI q, the same as xterm.
-pub const CursorStyle = enum {
-    bar, // DECSCUSR 5, 6
-    block, // DECSCUSR 1, 2
-    underline, // DECSCUSR 3, 4
-
-    /// The cursor styles below aren't known by DESCUSR and are custom
-    /// implemented in Ghostty. They are reported as some standard style
-    /// if requested, though.
-    /// Hollow block cursor. This is a block cursor with the center empty.
-    /// Reported as DECSCUSR 1 or 2 (block).
-    block_hollow,
-};
-
 /// Saved cursor state.
 pub const SavedCursor = struct {
     x: size.CellCountInt,
@@ -171,7 +160,7 @@ pub const SavedCursor = struct {
 /// State required for all charset operations.
 pub const CharsetState = struct {
     /// The list of graphical charsets by slot
-    charsets: CharsetArray = CharsetArray.initFill(charsets.Charset.utf8),
+    charsets: CharsetArray = .initFill(charsets.Charset.utf8),
 
     /// GL is the slot to use when using a 7-bit printable char (up to 127)
     /// GR used for 8-bit printable chars.
@@ -222,7 +211,9 @@ pub fn init(
 }
 
 pub fn deinit(self: *Screen) void {
-    self.kitty_images.deinit(self.alloc, self);
+    if (comptime build_options.kitty_graphics) {
+        self.kitty_images.deinit(self.alloc, self);
+    }
     self.cursor.deinit(self.alloc);
     self.pages.deinit();
 }
@@ -232,7 +223,12 @@ pub fn deinit(self: *Screen) void {
 /// tests. This only asserts the screen specific data so callers should
 /// ensure they're also calling page integrity checks if necessary.
 pub fn assertIntegrity(self: *const Screen) void {
-    if (build_config.slow_runtime_safety) {
+    if (build_options.slow_runtime_safety) {
+        // We don't run integrity checks on Valgrind because its soooooo slow,
+        // Valgrind is our integrity checker, and we run these during unit
+        // tests (non-Valgrind) anyways so we're verifying anyways.
+        if (std.valgrind.runningOnValgrind() > 0) return;
+
         assert(self.cursor.x < self.pages.cols);
         assert(self.cursor.y < self.pages.rows);
 
@@ -278,9 +274,11 @@ pub fn reset(self: *Screen) void {
         .page_cell = cursor_rac.cell,
     };
 
-    // Reset kitty graphics storage
-    self.kitty_images.deinit(self.alloc, self);
-    self.kitty_images = .{ .dirty = true };
+    if (comptime build_options.kitty_graphics) {
+        // Reset kitty graphics storage
+        self.kitty_images.deinit(self.alloc, self);
+        self.kitty_images = .{ .dirty = true };
+    }
 
     // Reset our basic state
     self.saved_cursor = null;
@@ -402,32 +400,47 @@ pub fn clonePool(
         };
 
         const start_pin = pin_remap.get(ordered.tl) orelse start: {
-            // No start means it is outside the cloned area. We change it
-            // to the top-left.
+            // No start means it is outside the cloned area.
 
             // If we have no end pin then either
             // (1) our whole selection is outside the cloned area or
             // (2) our cloned area is within the selection
             if (pin_remap.get(ordered.br) == null) {
-                // If our tl is before the cloned area and br is after
-                // the cloned area then the whole screen is selected.
-                // This detection is somewhat more expensive so we try
-                // to avoid it if possible so its nested in this if.
+                // We check if the selection bottom right pin is above
+                // the cloned area or if the top left pin is below the
+                // cloned area, in either of these cases it means that
+                // the selection is fully out of bounds, so we have no
+                // selection in the cloned area and break out now.
                 const clone_top = self.pages.pin(top) orelse break :sel null;
-                if (!sel.contains(self, clone_top)) break :sel null;
+                const clone_top_y = self.pages.pointFromPin(
+                    .screen,
+                    clone_top,
+                ).?.screen.y;
+                if (self.pages.pointFromPin(
+                    .screen,
+                    ordered.br.*,
+                ).?.screen.y < clone_top_y) break :sel null;
+                if (self.pages.pointFromPin(
+                    .screen,
+                    ordered.tl.*,
+                ).?.screen.y > clone_top_y) break :sel null;
             }
 
-            break :start try pages.trackPin(.{ .node = pages.pages.first.? });
+            // We move the top pin back in bounds to the top row.
+            break :start try pages.trackPin(.{
+                .node = pages.pages.first.?,
+                .x = if (sel.rectangle) ordered.tl.x else 0,
+            });
         };
 
-        const end_pin = pin_remap.get(ordered.br) orelse end: {
-            // No end means it is outside the cloned area. We change it
-            // to the bottom-right.
-            break :end try pages.trackPin(pages.pin(.{ .active = .{
-                .x = pages.cols - 1,
-                .y = pages.rows - 1,
-            } }) orelse break :sel null);
-        };
+        // If we got to this point it means that the selection is not
+        // fully out of bounds, so we move the bottom right pin back
+        // in bounds if it isn't already.
+        const end_pin = pin_remap.get(ordered.br) orelse try pages.trackPin(.{
+            .node = pages.pages.last.?,
+            .x = if (sel.rectangle) ordered.br.x else pages.cols - 1,
+            .y = pages.pages.last.?.data.size.rows - 1,
+        });
 
         break :sel .{
             .bounds = .{ .tracked = .{
@@ -520,13 +533,13 @@ pub fn adjustCapacity(
     return new_node;
 }
 
-pub fn cursorCellRight(self: *Screen, n: size.CellCountInt) *pagepkg.Cell {
+pub inline fn cursorCellRight(self: *Screen, n: size.CellCountInt) *pagepkg.Cell {
     assert(self.cursor.x + n < self.pages.cols);
     const cell: [*]pagepkg.Cell = @ptrCast(self.cursor.page_cell);
     return @ptrCast(cell + n);
 }
 
-pub fn cursorCellLeft(self: *Screen, n: size.CellCountInt) *pagepkg.Cell {
+pub inline fn cursorCellLeft(self: *Screen, n: size.CellCountInt) *pagepkg.Cell {
     assert(self.cursor.x >= n);
     const cell: [*]pagepkg.Cell = @ptrCast(self.cursor.page_cell);
     return @ptrCast(cell - n);
@@ -684,8 +697,10 @@ pub fn cursorDownScroll(self: *Screen) !void {
     assert(self.cursor.y == self.pages.rows - 1);
     defer self.assertIntegrity();
 
-    // Scrolling dirties the images because it updates their placements pins.
-    self.kitty_images.dirty = true;
+    if (comptime build_options.kitty_graphics) {
+        // Scrolling dirties the images because it updates their placements pins.
+        self.kitty_images.dirty = true;
+    }
 
     // If we have no scrollback, then we shift all our rows instead.
     if (self.no_scrollback) {
@@ -752,7 +767,7 @@ pub fn cursorDownScroll(self: *Screen) !void {
 
         // These assertions help catch some pagelist math errors. Our
         // x/y should be unchanged after the grow.
-        if (build_config.slow_runtime_safety) {
+        if (build_options.slow_runtime_safety) {
             const active = self.pages.pointFromPin(
                 .active,
                 page_pin,
@@ -924,8 +939,8 @@ fn cursorScrollAboveRotate(self: *Screen) !void {
     fastmem.rotateOnceR(Row, cur_rows[self.cursor.page_pin.y..cur_page.size.rows]);
     self.clearCells(
         cur_page,
-        &cur_rows[0],
-        cur_page.getCells(&cur_rows[0]),
+        &cur_rows[self.cursor.page_pin.y],
+        cur_page.getCells(&cur_rows[self.cursor.page_pin.y]),
     );
 
     // Set all the rows we rotated and cleared dirty
@@ -944,7 +959,7 @@ fn cursorScrollAboveRotate(self: *Screen) !void {
 
 /// Move the cursor down if we're not at the bottom of the screen. Otherwise
 /// scroll. Currently only used for testing.
-fn cursorDownOrScroll(self: *Screen) !void {
+inline fn cursorDownOrScroll(self: *Screen) !void {
     if (self.cursor.y + 1 < self.pages.rows) {
         self.cursorDown(1);
     } else {
@@ -1019,7 +1034,7 @@ pub fn cursorCopy(self: *Screen, other: Cursor, opts: struct {
 /// page than the old AND we have a style or hyperlink set. In that case,
 /// we must release our old one and insert the new one, since styles are
 /// stored per-page.
-fn cursorChangePin(self: *Screen, new: Pin) void {
+inline fn cursorChangePin(self: *Screen, new: Pin) void {
     // Moving the cursor affects text run splitting (ligatures) so
     // we must mark the old and new page dirty. We do this as long
     // as the pins are not equal
@@ -1093,7 +1108,7 @@ fn cursorChangePin(self: *Screen, new: Pin) void {
 
 /// Mark the cursor position as dirty.
 /// TODO: test
-pub fn cursorMarkDirty(self: *Screen) void {
+pub inline fn cursorMarkDirty(self: *Screen) void {
     self.cursor.page_pin.markDirty();
 }
 
@@ -1140,23 +1155,27 @@ pub const Scroll = union(enum) {
     active,
     top,
     pin: Pin,
+    row: usize,
     delta_row: isize,
     delta_prompt: isize,
 };
 
 /// Scroll the viewport of the terminal grid.
-pub fn scroll(self: *Screen, behavior: Scroll) void {
+pub inline fn scroll(self: *Screen, behavior: Scroll) void {
     defer self.assertIntegrity();
 
-    // No matter what, scrolling marks our image state as dirty since
-    // it could move placements. If there are no placements or no images
-    // this is still a very cheap operation.
-    self.kitty_images.dirty = true;
+    if (comptime build_options.kitty_graphics) {
+        // No matter what, scrolling marks our image state as dirty since
+        // it could move placements. If there are no placements or no images
+        // this is still a very cheap operation.
+        self.kitty_images.dirty = true;
+    }
 
     switch (behavior) {
         .active => self.pages.scroll(.{ .active = {} }),
         .top => self.pages.scroll(.{ .top = {} }),
         .pin => |p| self.pages.scroll(.{ .pin = p }),
+        .row => |v| self.pages.scroll(.{ .row = v }),
         .delta_row => |v| self.pages.scroll(.{ .delta_row = v }),
         .delta_prompt => |v| self.pages.scroll(.{ .delta_prompt = v }),
     }
@@ -1164,27 +1183,29 @@ pub fn scroll(self: *Screen, behavior: Scroll) void {
 
 /// See PageList.scrollClear. In addition to that, we reset the cursor
 /// to be on top.
-pub fn scrollClear(self: *Screen) !void {
+pub inline fn scrollClear(self: *Screen) !void {
     defer self.assertIntegrity();
 
     try self.pages.scrollClear();
     self.cursorReload();
 
-    // No matter what, scrolling marks our image state as dirty since
-    // it could move placements. If there are no placements or no images
-    // this is still a very cheap operation.
-    self.kitty_images.dirty = true;
+    if (comptime build_options.kitty_graphics) {
+        // No matter what, scrolling marks our image state as dirty since
+        // it could move placements. If there are no placements or no images
+        // this is still a very cheap operation.
+        self.kitty_images.dirty = true;
+    }
 }
 
 /// Returns true if the viewport is scrolled to the bottom of the screen.
-pub fn viewportIsBottom(self: Screen) bool {
+pub inline fn viewportIsBottom(self: Screen) bool {
     return self.pages.viewport == .active;
 }
 
 /// Erase the region specified by tl and br, inclusive. This will physically
 /// erase the rows meaning the memory will be reclaimed (if the underlying
 /// page is empty) and other rows will be shifted up.
-pub fn eraseRows(
+pub inline fn eraseRows(
     self: *Screen,
     tl: point.Point,
     bl: ?point.Point,
@@ -1256,6 +1277,17 @@ pub fn clearCells(
         self.assertIntegrity();
     }
 
+    if (comptime std.debug.runtime_safety) {
+        // Our row and cells should be within the page.
+        const page_rows = page.rows.ptr(page.memory.ptr);
+        assert(@intFromPtr(row) >= @intFromPtr(&page_rows[0]));
+        assert(@intFromPtr(row) <= @intFromPtr(&page_rows[page.size.rows - 1]));
+
+        const row_cells = page.getCells(row);
+        assert(@intFromPtr(&cells[0]) >= @intFromPtr(&row_cells[0]));
+        assert(@intFromPtr(&cells[cells.len - 1]) <= @intFromPtr(&row_cells[row_cells.len - 1]));
+    }
+
     // If this row has graphemes, then we need go through a slow path
     // and delete the cell graphemes.
     if (row.grapheme) {
@@ -1282,14 +1314,16 @@ pub fn clearCells(
         if (cells.len == self.pages.cols) row.styled = false;
     }
 
-    if (row.kitty_virtual_placeholder and
-        cells.len == self.pages.cols)
-    {
-        for (cells) |c| {
-            if (c.codepoint() == kitty.graphics.unicode.placeholder) {
-                break;
-            }
-        } else row.kitty_virtual_placeholder = false;
+    if (comptime build_options.kitty_graphics) {
+        if (row.kitty_virtual_placeholder and
+            cells.len == self.pages.cols)
+        {
+            for (cells) |c| {
+                if (c.codepoint() == kitty.graphics.unicode.placeholder) {
+                    break;
+                }
+            } else row.kitty_virtual_placeholder = false;
+        }
     }
 
     @memset(cells, self.blankCell());
@@ -1507,7 +1541,7 @@ pub fn splitCellBoundary(
 
 /// Returns the blank cell to use when doing terminal operations that
 /// require preserving the bg color.
-pub fn blankCell(self: *const Screen) Cell {
+pub inline fn blankCell(self: *const Screen) Cell {
     if (self.cursor.style_id == style.default_id) return .{};
     return self.cursor.style.bgCell() orelse .{};
 }
@@ -1525,7 +1559,7 @@ pub fn blankCell(self: *const Screen) Cell {
 /// probably means the system is in trouble anyways. I'd like to improve this
 /// in the future but it is not a priority particularly because this scenario
 /// (resize) is difficult.
-pub fn resize(
+pub inline fn resize(
     self: *Screen,
     cols: size.CellCountInt,
     rows: size.CellCountInt,
@@ -1536,7 +1570,7 @@ pub fn resize(
 /// Resize the screen without any reflow. In this mode, columns/rows will
 /// be truncated as they are shrunk. If they are grown, the new space is filled
 /// with zeros.
-pub fn resizeWithoutReflow(
+pub inline fn resizeWithoutReflow(
     self: *Screen,
     cols: size.CellCountInt,
     rows: size.CellCountInt,
@@ -1553,8 +1587,10 @@ fn resizeInternal(
 ) !void {
     defer self.assertIntegrity();
 
-    // No matter what we mark our image state as dirty
-    self.kitty_images.dirty = true;
+    if (comptime build_options.kitty_graphics) {
+        // No matter what we mark our image state as dirty
+        self.kitty_images.dirty = true;
+    }
 
     // Release the cursor style while resizing just
     // in case the cursor ends up on a different page.
@@ -2134,17 +2170,21 @@ pub const SelectionString = struct {
 /// Returns the raw text associated with a selection. This will unwrap
 /// soft-wrapped edges. The returned slice is owned by the caller and allocated
 /// using alloc, not the allocator associated with the screen (unless they match).
-pub fn selectionString(self: *Screen, alloc: Allocator, opts: SelectionString) ![:0]const u8 {
+pub fn selectionString(
+    self: *Screen,
+    alloc: Allocator,
+    opts: SelectionString,
+) ![:0]const u8 {
     // Use an ArrayList so that we can grow the array as we go. We
     // build an initial capacity of just our rows in our selection times
     // columns. It can be more or less based on graphemes, newlines, etc.
-    var strbuilder = std.ArrayList(u8).init(alloc);
-    defer strbuilder.deinit();
+    var strbuilder: std.ArrayList(u8) = .empty;
+    defer strbuilder.deinit(alloc);
 
     // If we're building a stringmap, create our builder for the pins.
     const MapBuilder = std.ArrayList(Pin);
-    var mapbuilder: ?MapBuilder = if (opts.map != null) MapBuilder.init(alloc) else null;
-    defer if (mapbuilder) |*b| b.deinit();
+    var mapbuilder: ?MapBuilder = if (opts.map != null) .empty else null;
+    defer if (mapbuilder) |*b| b.deinit(alloc);
 
     const sel_ordered = opts.sel.ordered(self, .forward);
     const sel_start: Pin = start: {
@@ -2201,9 +2241,9 @@ pub fn selectionString(self: *Screen, alloc: Allocator, opts: SelectionString) !
                     const raw: u21 = if (cell.hasText()) cell.content.codepoint else 0;
                     const char = if (raw > 0) raw else ' ';
                     const encode_len = try std.unicode.utf8Encode(char, &buf);
-                    try strbuilder.appendSlice(buf[0..encode_len]);
+                    try strbuilder.appendSlice(alloc, buf[0..encode_len]);
                     if (mapbuilder) |*b| {
-                        for (0..encode_len) |_| try b.append(.{
+                        for (0..encode_len) |_| try b.append(alloc, .{
                             .node = chunk.node,
                             .y = @intCast(y),
                             .x = @intCast(x),
@@ -2214,9 +2254,9 @@ pub fn selectionString(self: *Screen, alloc: Allocator, opts: SelectionString) !
                     const cps = chunk.node.data.lookupGrapheme(cell).?;
                     for (cps) |cp| {
                         const encode_len = try std.unicode.utf8Encode(cp, &buf);
-                        try strbuilder.appendSlice(buf[0..encode_len]);
+                        try strbuilder.appendSlice(alloc, buf[0..encode_len]);
                         if (mapbuilder) |*b| {
-                            for (0..encode_len) |_| try b.append(.{
+                            for (0..encode_len) |_| try b.append(alloc, .{
                                 .node = chunk.node,
                                 .y = @intCast(y),
                                 .x = @intCast(x),
@@ -2231,8 +2271,8 @@ pub fn selectionString(self: *Screen, alloc: Allocator, opts: SelectionString) !
             if (!is_final_row and
                 (!row.wrap or sel_ordered.rectangle))
             {
-                try strbuilder.append('\n');
-                if (mapbuilder) |*b| try b.append(.{
+                try strbuilder.append(alloc, '\n');
+                if (mapbuilder) |*b| try b.append(alloc, .{
                     .node = chunk.node,
                     .y = @intCast(y),
                     .x = chunk.node.data.size.cols - 1,
@@ -2247,11 +2287,11 @@ pub fn selectionString(self: *Screen, alloc: Allocator, opts: SelectionString) !
 
     // If we have a mapbuilder, we need to setup our string map.
     if (mapbuilder) |*b| {
-        var strclone = try strbuilder.clone();
-        defer strclone.deinit();
-        const str = try strclone.toOwnedSliceSentinel(0);
+        var strclone = try strbuilder.clone(alloc);
+        defer strclone.deinit(alloc);
+        const str = try strclone.toOwnedSliceSentinel(alloc, 0);
         errdefer alloc.free(str);
-        const map = try b.toOwnedSlice();
+        const map = try b.toOwnedSlice(alloc);
         errdefer alloc.free(map);
         opts.map.?.* = .{ .string = str, .map = map };
     }
@@ -2272,7 +2312,7 @@ pub fn selectionString(self: *Screen, alloc: Allocator, opts: SelectionString) !
             const i = strbuilder.items.len;
             strbuilder.items.len += trimmed.len;
             std.mem.copyForwards(u8, strbuilder.items[i..], trimmed);
-            try strbuilder.append('\n');
+            try strbuilder.append(alloc, '\n');
         }
 
         // Remove all trailing newlines
@@ -2283,7 +2323,7 @@ pub fn selectionString(self: *Screen, alloc: Allocator, opts: SelectionString) !
     }
 
     // Get our final string
-    const string = try strbuilder.toOwnedSliceSentinel(0);
+    const string = try strbuilder.toOwnedSliceSentinel(alloc, 0);
     errdefer alloc.free(string);
 
     return string;
@@ -2422,7 +2462,7 @@ pub fn selectLine(self: *const Screen, opts: SelectLine) ?Selection {
         return null;
     };
 
-    return Selection.init(start, end, false);
+    return .init(start, end, false);
 }
 
 /// Return the selection for all contents on the screen. Surrounding
@@ -2478,7 +2518,7 @@ pub fn selectAll(self: *Screen) ?Selection {
         return null;
     };
 
-    return Selection.init(start, end, false);
+    return .init(start, end, false);
 }
 
 /// Select the nearest word to start point that is between start_pt and
@@ -2527,6 +2567,7 @@ pub fn selectWord(self: *Screen, pin: Pin) ?Selection {
         '`',
         '|',
         ':',
+        ';',
         ',',
         '(',
         ')',
@@ -2613,7 +2654,7 @@ pub fn selectWord(self: *Screen, pin: Pin) ?Selection {
         break :start prev;
     };
 
-    return Selection.init(start, end, false);
+    return .init(start, end, false);
 }
 
 /// Select the command output under the given point. The limits of the output
@@ -2713,7 +2754,7 @@ pub fn selectOutput(self: *Screen, pin: Pin) ?Selection {
         break :boundary it_prev;
     };
 
-    return Selection.init(start, end, false);
+    return .init(start, end, false);
 }
 
 /// Returns the selection bounds for the prompt at the given point. If the
@@ -2794,7 +2835,7 @@ pub fn selectPrompt(self: *Screen, pin: Pin) ?Selection {
         break :end it_prev;
     };
 
-    return Selection.init(start, end, false);
+    return .init(start, end, false);
 }
 
 pub const LineIterator = struct {
@@ -2868,7 +2909,7 @@ pub fn promptPath(
 /// one byte at a time.
 pub fn dumpString(
     self: *const Screen,
-    writer: anytype,
+    writer: *std.Io.Writer,
     opts: PageList.EncodeUtf8Options,
 ) anyerror!void {
     try self.pages.encodeUtf8(writer, opts);
@@ -2881,10 +2922,10 @@ pub fn dumpStringAlloc(
     alloc: Allocator,
     tl: point.Point,
 ) ![]const u8 {
-    var builder = std.ArrayList(u8).init(alloc);
+    var builder: std.Io.Writer.Allocating = .init(alloc);
     defer builder.deinit();
 
-    try self.dumpString(builder.writer(), .{
+    try self.dumpString(&builder.writer, .{
         .tl = self.pages.getTopLeft(tl),
         .br = self.pages.getBottomRight(tl) orelse return error.UnknownPoint,
         .unwrap = false,
@@ -2900,10 +2941,10 @@ pub fn dumpStringAllocUnwrapped(
     alloc: Allocator,
     tl: point.Point,
 ) ![]const u8 {
-    var builder = std.ArrayList(u8).init(alloc);
+    var builder: std.Io.Writer.Allocating = .init(alloc);
     defer builder.deinit();
 
-    try self.dumpString(builder.writer(), .{
+    try self.dumpString(&builder.writer, .{
         .tl = self.pages.getTopLeft(tl),
         .br = self.pages.getBottomRight(tl) orelse return error.UnknownPoint,
         .unwrap = true,
@@ -3039,6 +3080,29 @@ pub fn testWriteString(self: *Screen, text: []const u8) !void {
         } else {
             self.cursor.pending_wrap = true;
         }
+    }
+}
+
+/// Write text that's marked as a semantic prompt.
+fn testWriteSemanticString(self: *Screen, text: []const u8, semantic_prompt: Row.SemanticPrompt) !void {
+    // Determine the first row using the cursor position. If we know that our
+    // first write is going to start on the next line because of a pending
+    // wrap, we'll proactively start there.
+    const start_y = if (self.cursor.pending_wrap) self.cursor.y + 1 else self.cursor.y;
+
+    try self.testWriteString(text);
+
+    // Determine the last row that we actually wrote by inspecting the cursor's
+    // position. If we're in the first column, we haven't actually written any
+    // characters to it, so we end at the preceding row instead.
+    const end_y = if (self.cursor.x > 0) self.cursor.y else self.cursor.y - 1;
+
+    // Mark the full range of written rows with our semantic prompt.
+    var y = start_y;
+    while (y <= end_y) {
+        const pin = self.pages.pin(.{ .active = .{ .y = y } }).?;
+        pin.rowAndCell().row.semantic_prompt = semantic_prompt;
+        y += 1;
     }
 }
 
@@ -3660,16 +3724,11 @@ test "Screen: clearPrompt" {
 
     var s = try init(alloc, 5, 3, 0);
     defer s.deinit();
-    const str = "1ABCD\n2EFGH\n3IJKL";
-    try s.testWriteString(str);
 
     // Set one of the rows to be a prompt
-    {
-        s.cursorAbsolute(0, 1);
-        s.cursor.page_row.semantic_prompt = .prompt;
-        s.cursorAbsolute(0, 2);
-        s.cursor.page_row.semantic_prompt = .input;
-    }
+    try s.testWriteSemanticString("1ABCD\n", .unknown);
+    try s.testWriteSemanticString("2EFGH\n", .prompt);
+    try s.testWriteSemanticString("3IJKL", .input);
 
     s.clearPrompt();
 
@@ -3686,18 +3745,12 @@ test "Screen: clearPrompt continuation" {
 
     var s = try init(alloc, 5, 4, 0);
     defer s.deinit();
-    const str = "1ABCD\n2EFGH\n3IJKL\n4MNOP";
-    try s.testWriteString(str);
 
     // Set one of the rows to be a prompt followed by a continuation row
-    {
-        s.cursorAbsolute(0, 1);
-        s.cursor.page_row.semantic_prompt = .prompt;
-        s.cursorAbsolute(0, 2);
-        s.cursor.page_row.semantic_prompt = .prompt_continuation;
-        s.cursorAbsolute(0, 3);
-        s.cursor.page_row.semantic_prompt = .input;
-    }
+    try s.testWriteSemanticString("1ABCD\n", .unknown);
+    try s.testWriteSemanticString("2EFGH\n", .prompt);
+    try s.testWriteSemanticString("3IJKL\n", .prompt_continuation);
+    try s.testWriteSemanticString("4MNOP", .input);
 
     s.clearPrompt();
 
@@ -3708,22 +3761,17 @@ test "Screen: clearPrompt continuation" {
     }
 }
 
-test "Screen: clearPrompt consecutive prompts" {
+test "Screen: clearPrompt consecutive inputs" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
     var s = try init(alloc, 5, 3, 0);
     defer s.deinit();
-    const str = "1ABCD\n2EFGH\n3IJKL";
-    try s.testWriteString(str);
 
-    // Set both rows to be prompts
-    {
-        s.cursorAbsolute(0, 1);
-        s.cursor.page_row.semantic_prompt = .input;
-        s.cursorAbsolute(0, 2);
-        s.cursor.page_row.semantic_prompt = .input;
-    }
+    // Set both rows to be inputs
+    try s.testWriteSemanticString("1ABCD\n", .unknown);
+    try s.testWriteSemanticString("2EFGH\n", .input);
+    try s.testWriteSemanticString("3IJKL", .input);
 
     s.clearPrompt();
 
@@ -4818,6 +4866,83 @@ test "Screen: scroll above creates new page" {
     try testing.expect(s.pages.isDirty(.{ .active = .{ .x = 0, .y = 2 } }));
 }
 
+test "Screen: scroll above with cursor on non-final row" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var s = try init(alloc, 10, 4, 10);
+    defer s.deinit();
+
+    // Get the cursor to be 2 rows above a new page
+    const first_page_size = s.pages.pages.first.?.data.capacity.rows;
+    s.pages.pages.first.?.data.pauseIntegrityChecks(true);
+    for (0..first_page_size - 3) |_| try s.testWriteString("\n");
+    s.pages.pages.first.?.data.pauseIntegrityChecks(false);
+
+    // Write 3 lines of text, forcing the last line into the first
+    // row of a new page. Move our cursor onto the previous page.
+    try s.setAttribute(.{ .direct_color_bg = .{ .r = 155 } });
+    try s.testWriteString("1AB\n2BC\n3DE\n4FG");
+    s.cursorAbsolute(0, 1);
+    s.pages.clearDirty();
+
+    // Ensure we're still on the first page. So our cursor is on the first
+    // page but we have two pages of data.
+    try testing.expect(s.cursor.page_pin.node == s.pages.pages.first.?);
+
+    //      +----------+ = PAGE 0
+    //  ... :          :
+    //     +-------------+ ACTIVE
+    // 4305 |1AB0000000| | 0
+    // 4306 |2BC0000000| | 1
+    //      :^         : : = PIN 0
+    // 4307 |3DE0000000| | 2
+    //      +----------+ :
+    //      +----------+ : = PAGE 1
+    //    0 |4FG0000000| | 3
+    //      +----------+ :
+    //     +-------------+
+    try s.cursorScrollAbove();
+
+    //     +----------+ = PAGE 0
+    //  ... :          :
+    // 4305 |1AB0000000|
+    //     +-------------+ ACTIVE
+    // 4306 |2BC0000000| | 0
+    // 4307 |          | | 1
+    //      :^         : : = PIN 0
+    //      +----------+ :
+    //      +----------+ : = PAGE 1
+    //    0 |3DE0000000| | 2
+    //    1 |4FG0000000| | 3
+    //      +----------+ :
+    //     +-------------+
+    // try s.pages.diagram(std.io.getStdErr().writer());
+
+    {
+        const contents = try s.dumpStringAlloc(alloc, .{ .viewport = .{} });
+        defer alloc.free(contents);
+        try testing.expectEqualStrings("2BC\n\n3DE\n4FG", contents);
+    }
+    {
+        const list_cell = s.pages.getCell(.{ .active = .{ .x = 0, .y = 1 } }).?;
+        const cell = list_cell.cell;
+        try testing.expect(cell.content_tag == .bg_color_rgb);
+        try testing.expectEqual(Cell.RGB{
+            .r = 155,
+            .g = 0,
+            .b = 0,
+        }, cell.content.color_rgb);
+    }
+
+    // Page 0's penultimate row is dirty because the cursor moved off of it.
+    try testing.expect(s.pages.isDirty(.{ .active = .{ .x = 0, .y = 0 } }));
+    // Page 0's final row is dirty because it was cleared.
+    try testing.expect(s.pages.isDirty(.{ .active = .{ .x = 0, .y = 1 } }));
+    // Page 1's row is dirty because it's new.
+    try testing.expect(s.pages.isDirty(.{ .active = .{ .x = 0, .y = 2 } }));
+}
+
 test "Screen: scroll above no scrollback bottom of page" {
     const testing = std.testing;
     const alloc = testing.allocator;
@@ -5194,6 +5319,45 @@ test "Screen: clone contains subset of selection" {
         } }, s2.pages.pointFromPin(.active, sel.start()).?);
         try testing.expectEqual(point.Point{ .active = .{
             .x = s2.pages.cols - 1,
+            .y = 3,
+        } }, s2.pages.pointFromPin(.active, sel.end()).?);
+    }
+}
+
+test "Screen: clone contains subset of rectangle selection" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var s = try init(alloc, 5, 4, 1);
+    defer s.deinit();
+    try s.testWriteString("1ABCD\n2EFGH\n3IJKL\n4ABCD");
+
+    // Select the full screen from x=1 to x=3
+    try s.select(Selection.init(
+        s.pages.pin(.{ .active = .{ .x = 1, .y = 0 } }).?,
+        s.pages.pin(.{ .active = .{ .x = 3, .y = 3 } }).?,
+        true,
+    ));
+
+    // Clone
+    var s2 = try s.clone(
+        alloc,
+        .{ .active = .{ .y = 1 } },
+        .{ .active = .{ .y = 2 } },
+    );
+    defer s2.deinit();
+
+    // Our selection should remain valid and be properly clipped
+    // preserving the columns of the start and end points of the
+    // selection.
+    {
+        const sel = s2.selection.?;
+        try testing.expectEqual(point.Point{ .active = .{
+            .x = 1,
+            .y = 0,
+        } }, s2.pages.pointFromPin(.active, sel.start()).?);
+        try testing.expectEqual(point.Point{ .active = .{
+            .x = 3,
             .y = 3,
         } }, s2.pages.pointFromPin(.active, sel.end()).?);
     }
@@ -5915,26 +6079,24 @@ test "Screen: resize more cols no reflow preserves semantic prompt" {
 
     var s = try init(alloc, 5, 3, 0);
     defer s.deinit();
-    const str = "1ABCD\n2EFGH\n3IJKL";
-    try s.testWriteString(str);
 
     // Set one of the rows to be a prompt
-    {
-        s.cursorAbsolute(0, 1);
-        s.cursor.page_row.semantic_prompt = .prompt;
-    }
+    try s.testWriteSemanticString("1ABCD\n", .unknown);
+    try s.testWriteSemanticString("2EFGH\n", .prompt);
+    try s.testWriteSemanticString("3IJKL", .unknown);
 
     try s.resize(10, 3);
 
+    const expected = "1ABCD\n2EFGH\n3IJKL";
     {
         const contents = try s.dumpStringAlloc(alloc, .{ .viewport = .{} });
         defer alloc.free(contents);
-        try testing.expectEqualStrings(str, contents);
+        try testing.expectEqualStrings(expected, contents);
     }
     {
         const contents = try s.dumpStringAlloc(alloc, .{ .screen = .{} });
         defer alloc.free(contents);
-        try testing.expectEqualStrings(str, contents);
+        try testing.expectEqualStrings(expected, contents);
     }
 
     // Our one row should still be a semantic prompt, the others should not.
@@ -7365,18 +7527,14 @@ test "Screen: selectLine semantic prompt boundary" {
 
     var s = try init(alloc, 5, 10, 0);
     defer s.deinit();
-    try s.testWriteString("ABCDE\nA    > ");
+    try s.testWriteSemanticString("ABCDE\n", .unknown);
+    try s.testWriteSemanticString("A    ", .prompt);
+    try s.testWriteSemanticString("> ", .unknown);
 
     {
         const contents = try s.dumpStringAlloc(alloc, .{ .screen = .{} });
         defer alloc.free(contents);
         try testing.expectEqualStrings("ABCDE\nA    \n> ", contents);
-    }
-
-    {
-        const pin = s.pages.pin(.{ .screen = .{ .y = 1 } }).?;
-        const row = pin.rowAndCell().row;
-        row.semantic_prompt = .prompt;
     }
 
     // Selecting output stops at the prompt even if soft-wrapped
@@ -7664,6 +7822,7 @@ test "Screen: selectWord with character boundary" {
         " `abc` \n123",
         " |abc| \n123",
         " :abc: \n123",
+        " ;abc; \n123",
         " ,abc, \n123",
         " (abc( \n123",
         " )abc) \n123",
@@ -7763,54 +7922,22 @@ test "Screen: selectOutput" {
     // zig fmt: off
     {
                                                                   // line number:
-        try s.testWriteString("output1\n");                       // 0
-        try s.testWriteString("output1\n");                       // 1
-        try s.testWriteString("prompt2\n");                       // 2
-        try s.testWriteString("input2\n");                        // 3
-        try s.testWriteString("output2output2output2output2\n");  // 4, 5, 6 due to overflow
-        try s.testWriteString("output2\n");                       // 7
-        try s.testWriteString("prompt3$ input3\n");               // 8
-        try s.testWriteString("output3\n");                       // 9
-        try s.testWriteString("output3\n");                       // 10
-        try s.testWriteString("output3");                         // 11
+        try s.testWriteSemanticString("output1\n", .command);     // 0
+        try s.testWriteSemanticString("output1\n", .command);     // 1
+        try s.testWriteSemanticString("prompt2\n", .prompt);      // 2
+        try s.testWriteSemanticString("input2\n", .input);        // 3
+        try s.testWriteSemanticString(                            //
+            "output2output2output2output2\n",                     // 4, 5, 6 due to overflow
+            .command,                                             //
+        );                                                        //
+        try s.testWriteSemanticString("output2\n", .command);     // 7
+        try s.testWriteSemanticString("$ ", .prompt);             // 8 prompt
+        try s.testWriteSemanticString("input3\n", .input);        // 8 input
+        try s.testWriteSemanticString("output3\n", .command);     // 9
+        try s.testWriteSemanticString("output3\n", .command);     // 10
+        try s.testWriteSemanticString("output3", .command);       // 11
     }
     // zig fmt: on
-
-    {
-        const pin = s.pages.pin(.{ .screen = .{ .y = 2 } }).?;
-        const row = pin.rowAndCell().row;
-        row.semantic_prompt = .prompt;
-    }
-    {
-        const pin = s.pages.pin(.{ .screen = .{ .y = 3 } }).?;
-        const row = pin.rowAndCell().row;
-        row.semantic_prompt = .input;
-    }
-    {
-        const pin = s.pages.pin(.{ .screen = .{ .y = 4 } }).?;
-        const row = pin.rowAndCell().row;
-        row.semantic_prompt = .command;
-    }
-    {
-        const pin = s.pages.pin(.{ .screen = .{ .y = 5 } }).?;
-        const row = pin.rowAndCell().row;
-        row.semantic_prompt = .command;
-    }
-    {
-        const pin = s.pages.pin(.{ .screen = .{ .y = 6 } }).?;
-        const row = pin.rowAndCell().row;
-        row.semantic_prompt = .command;
-    }
-    {
-        const pin = s.pages.pin(.{ .screen = .{ .y = 8 } }).?;
-        const row = pin.rowAndCell().row;
-        row.semantic_prompt = .input;
-    }
-    {
-        const pin = s.pages.pin(.{ .screen = .{ .y = 9 } }).?;
-        const row = pin.rowAndCell().row;
-        row.semantic_prompt = .command;
-    }
 
     // No start marker, should select from the beginning
     {
@@ -7857,26 +7984,17 @@ test "Screen: selectOutput" {
         } }, s.pages.pointFromPin(.active, sel.start()).?);
         try testing.expectEqual(point.Point{ .active = .{
             .x = 9,
-            .y = 12,
+            .y = 11,
         } }, s.pages.pointFromPin(.active, sel.end()).?);
     }
     // input / prompt at y = 0, pt.y = 0
     {
         s.deinit();
         s = try init(alloc, 10, 5, 0);
-        try s.testWriteString("prompt1$ input1\n");
-        try s.testWriteString("output1\n");
-        try s.testWriteString("prompt2\n");
-        {
-            const pin = s.pages.pin(.{ .screen = .{ .y = 0 } }).?;
-            const row = pin.rowAndCell().row;
-            row.semantic_prompt = .input;
-        }
-        {
-            const pin = s.pages.pin(.{ .screen = .{ .y = 1 } }).?;
-            const row = pin.rowAndCell().row;
-            row.semantic_prompt = .command;
-        }
+        try s.testWriteSemanticString("$ ", .prompt);
+        try s.testWriteSemanticString("input1\n", .input);
+        try s.testWriteSemanticString("output1\n", .command);
+        try s.testWriteSemanticString("prompt2\n", .prompt);
         try testing.expect(s.selectOutput(s.pages.pin(.{ .active = .{
             .x = 2,
             .y = 0,
@@ -7893,45 +8011,20 @@ test "Screen: selectPrompt basics" {
 
     // zig fmt: off
     {
-                                                    // line number:
-        try s.testWriteString("output1\n");         // 0
-        try s.testWriteString("output1\n");         // 1
-        try s.testWriteString("prompt2\n");         // 2
-        try s.testWriteString("input2\n");          // 3
-        try s.testWriteString("output2\n");         // 4
-        try s.testWriteString("output2\n");         // 5
-        try s.testWriteString("prompt3$ input3\n"); // 6
-        try s.testWriteString("output3\n");         // 7
-        try s.testWriteString("output3\n");         // 8
-        try s.testWriteString("output3");           // 9
+                                                                // line number:
+        try s.testWriteSemanticString("output1\n", .command);   // 0
+        try s.testWriteSemanticString("output1\n", .command);   // 1
+        try s.testWriteSemanticString("prompt2\n", .prompt);    // 2
+        try s.testWriteSemanticString("input2\n", .input);      // 3
+        try s.testWriteSemanticString("output2\n", .command);   // 4
+        try s.testWriteSemanticString("output2\n", .command);   // 5
+        try s.testWriteSemanticString("$ ", .prompt);           // 6 prompt
+        try s.testWriteSemanticString("input3\n", .input);      // 6 input
+        try s.testWriteSemanticString("output3\n", .command);   // 7
+        try s.testWriteSemanticString("output3\n", .command);   // 8
+        try s.testWriteSemanticString("output3", .command);     // 9
     }
     // zig fmt: on
-
-    {
-        const pin = s.pages.pin(.{ .screen = .{ .y = 2 } }).?;
-        const row = pin.rowAndCell().row;
-        row.semantic_prompt = .prompt;
-    }
-    {
-        const pin = s.pages.pin(.{ .screen = .{ .y = 3 } }).?;
-        const row = pin.rowAndCell().row;
-        row.semantic_prompt = .input;
-    }
-    {
-        const pin = s.pages.pin(.{ .screen = .{ .y = 4 } }).?;
-        const row = pin.rowAndCell().row;
-        row.semantic_prompt = .command;
-    }
-    {
-        const pin = s.pages.pin(.{ .screen = .{ .y = 6 } }).?;
-        const row = pin.rowAndCell().row;
-        row.semantic_prompt = .input;
-    }
-    {
-        const pin = s.pages.pin(.{ .screen = .{ .y = 7 } }).?;
-        const row = pin.rowAndCell().row;
-        row.semantic_prompt = .command;
-    }
 
     // Not at a prompt
     {
@@ -7993,29 +8086,13 @@ test "Screen: selectPrompt prompt at start" {
 
     // zig fmt: off
     {
-                                                    // line number:
-        try s.testWriteString("prompt1\n");         // 0
-        try s.testWriteString("input1\n");          // 1
-        try s.testWriteString("output2\n");         // 2
-        try s.testWriteString("output2\n");         // 3
+                                                                // line number:
+        try s.testWriteSemanticString("prompt1\n", .prompt);    // 0
+        try s.testWriteSemanticString("input1\n", .input);      // 1
+        try s.testWriteSemanticString("output2\n", .command);   // 2
+        try s.testWriteSemanticString("output2\n", .command);   // 3
     }
     // zig fmt: on
-
-    {
-        const pin = s.pages.pin(.{ .screen = .{ .y = 0 } }).?;
-        const row = pin.rowAndCell().row;
-        row.semantic_prompt = .prompt;
-    }
-    {
-        const pin = s.pages.pin(.{ .screen = .{ .y = 1 } }).?;
-        const row = pin.rowAndCell().row;
-        row.semantic_prompt = .input;
-    }
-    {
-        const pin = s.pages.pin(.{ .screen = .{ .y = 2 } }).?;
-        const row = pin.rowAndCell().row;
-        row.semantic_prompt = .command;
-    }
 
     // Not at a prompt
     {
@@ -8053,24 +8130,13 @@ test "Screen: selectPrompt prompt at end" {
 
     // zig fmt: off
     {
-                                                    // line number:
-        try s.testWriteString("output2\n");         // 0
-        try s.testWriteString("output2\n");         // 1
-        try s.testWriteString("prompt1\n");         // 2
-        try s.testWriteString("input1\n");          // 3
+                                                                // line number:
+        try s.testWriteSemanticString("output2\n", .command);   // 0
+        try s.testWriteSemanticString("output2\n", .command);   // 1
+        try s.testWriteSemanticString("prompt1\n", .prompt);    // 2
+        try s.testWriteSemanticString("input1\n", .input);      // 3
     }
     // zig fmt: on
-
-    {
-        const pin = s.pages.pin(.{ .screen = .{ .y = 2 } }).?;
-        const row = pin.rowAndCell().row;
-        row.semantic_prompt = .prompt;
-    }
-    {
-        const pin = s.pages.pin(.{ .screen = .{ .y = 3 } }).?;
-        const row = pin.rowAndCell().row;
-        row.semantic_prompt = .input;
-    }
 
     // Not at a prompt
     {
@@ -8108,45 +8174,20 @@ test "Screen: promptPath" {
 
     // zig fmt: off
     {
-                                                    // line number:
-        try s.testWriteString("output1\n");         // 0
-        try s.testWriteString("output1\n");         // 1
-        try s.testWriteString("prompt2\n");         // 2
-        try s.testWriteString("input2\n");          // 3
-        try s.testWriteString("output2\n");         // 4
-        try s.testWriteString("output2\n");         // 5
-        try s.testWriteString("prompt3$ input3\n"); // 6
-        try s.testWriteString("output3\n");         // 7
-        try s.testWriteString("output3\n");         // 8
-        try s.testWriteString("output3");           // 9
+                                                                // line number:
+        try s.testWriteSemanticString("output1\n", .command);   // 0
+        try s.testWriteSemanticString("output1\n", .command);   // 1
+        try s.testWriteSemanticString("prompt2\n", .prompt);    // 2
+        try s.testWriteSemanticString("input2\n", .input);      // 3
+        try s.testWriteSemanticString("output2\n", .command);   // 4
+        try s.testWriteSemanticString("output2\n", .command);   // 5
+        try s.testWriteSemanticString("$ ", .prompt);           // 6 prompt
+        try s.testWriteSemanticString("input3\n", .input);      // 6 input
+        try s.testWriteSemanticString("output3\n", .command);   // 7
+        try s.testWriteSemanticString("output3\n", .command);   // 8
+        try s.testWriteSemanticString("output3", .command);     // 9
     }
     // zig fmt: on
-
-    {
-        const pin = s.pages.pin(.{ .screen = .{ .y = 2 } }).?;
-        const row = pin.rowAndCell().row;
-        row.semantic_prompt = .prompt;
-    }
-    {
-        const pin = s.pages.pin(.{ .screen = .{ .y = 3 } }).?;
-        const row = pin.rowAndCell().row;
-        row.semantic_prompt = .input;
-    }
-    {
-        const pin = s.pages.pin(.{ .screen = .{ .y = 4 } }).?;
-        const row = pin.rowAndCell().row;
-        row.semantic_prompt = .command;
-    }
-    {
-        const pin = s.pages.pin(.{ .screen = .{ .y = 6 } }).?;
-        const row = pin.rowAndCell().row;
-        row.semantic_prompt = .input;
-    }
-    {
-        const pin = s.pages.pin(.{ .screen = .{ .y = 7 } }).?;
-        const row = pin.rowAndCell().row;
-        row.semantic_prompt = .command;
-    }
 
     // From is not in the prompt
     {
@@ -8997,33 +9038,33 @@ test "Screen UTF8 cell map with newlines" {
 
     var cell_map = Page.CellMap.init(alloc);
     defer cell_map.deinit();
-    var builder = std.ArrayList(u8).init(alloc);
+    var builder: std.Io.Writer.Allocating = .init(alloc);
     defer builder.deinit();
-    try s.dumpString(builder.writer(), .{
+    try s.dumpString(&builder.writer, .{
         .tl = s.pages.getTopLeft(.screen),
         .br = s.pages.getBottomRight(.screen),
         .cell_map = &cell_map,
     });
 
-    try testing.expectEqual(7, builder.items.len);
-    try testing.expectEqualStrings("A\n\nB\n\nC", builder.items);
-    try testing.expectEqual(builder.items.len, cell_map.items.len);
+    try testing.expectEqual(7, builder.written().len);
+    try testing.expectEqualStrings("A\n\nB\n\nC", builder.written());
+    try testing.expectEqual(builder.written().len, cell_map.map.items.len);
     try testing.expectEqual(Page.CellMapEntry{
         .x = 0,
         .y = 0,
-    }, cell_map.items[0]);
+    }, cell_map.map.items[0]);
     try testing.expectEqual(Page.CellMapEntry{
         .x = 1,
         .y = 0,
-    }, cell_map.items[1]);
+    }, cell_map.map.items[1]);
     try testing.expectEqual(Page.CellMapEntry{
         .x = 0,
         .y = 1,
-    }, cell_map.items[2]);
+    }, cell_map.map.items[2]);
     try testing.expectEqual(Page.CellMapEntry{
         .x = 0,
         .y = 2,
-    }, cell_map.items[3]);
+    }, cell_map.map.items[3]);
 }
 
 test "Screen UTF8 cell map with blank prefix" {
@@ -9035,32 +9076,32 @@ test "Screen UTF8 cell map with blank prefix" {
     s.cursorAbsolute(2, 1);
     try s.testWriteString("B");
 
-    var cell_map = Page.CellMap.init(alloc);
+    var cell_map: Page.CellMap = .init(alloc);
     defer cell_map.deinit();
-    var builder = std.ArrayList(u8).init(alloc);
+    var builder: std.Io.Writer.Allocating = .init(alloc);
     defer builder.deinit();
-    try s.dumpString(builder.writer(), .{
+    try s.dumpString(&builder.writer, .{
         .tl = s.pages.getTopLeft(.screen),
         .br = s.pages.getBottomRight(.screen),
         .cell_map = &cell_map,
     });
 
-    try testing.expectEqualStrings("\n  B", builder.items);
-    try testing.expectEqual(builder.items.len, cell_map.items.len);
+    try testing.expectEqualStrings("\n  B", builder.written());
+    try testing.expectEqual(builder.written().len, cell_map.map.items.len);
     try testing.expectEqual(Page.CellMapEntry{
         .x = 0,
         .y = 0,
-    }, cell_map.items[0]);
+    }, cell_map.map.items[0]);
     try testing.expectEqual(Page.CellMapEntry{
         .x = 0,
         .y = 1,
-    }, cell_map.items[1]);
+    }, cell_map.map.items[1]);
     try testing.expectEqual(Page.CellMapEntry{
         .x = 1,
         .y = 1,
-    }, cell_map.items[2]);
+    }, cell_map.map.items[2]);
     try testing.expectEqual(Page.CellMapEntry{
         .x = 2,
         .y = 1,
-    }, cell_map.items[3]);
+    }, cell_map.map.items[3]);
 }

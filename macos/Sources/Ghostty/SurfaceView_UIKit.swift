@@ -30,10 +30,16 @@ extension Ghostty {
 
         // The hovered URL
         @Published var hoverUrl: String? = nil
+        
+        // The progress report (if any)
+        @Published var progressReport: Action.ProgressReport? = nil
 
         // The time this surface last became focused. This is a ContinuousClock.Instant
         // on supported platforms.
         @Published var focusInstant: ContinuousClock.Instant? = nil
+
+        /// True when the bell is active. This is set inactive on focus or event.
+        @Published var bell: Bool = false
 
         // Returns sizing information for the surface. This is the raw C
         // structure because I'm lazy.
@@ -54,8 +60,10 @@ extension Ghostty {
 
             // Setup our surface. This will also initialize all the terminal IO.
             let surface_cfg = baseConfig ?? SurfaceConfiguration()
-            var surface_cfg_c = surface_cfg.ghosttyConfig(view: self)
-            guard let surface = ghostty_surface_new(app, &surface_cfg_c) else {
+            let surface = surface_cfg.withCValue(view: self) { surface_cfg_c in
+                ghostty_surface_new(app, &surface_cfg_c)
+            }
+            guard let surface = surface else {
                 // TODO
                 return
             }

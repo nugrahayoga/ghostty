@@ -13,10 +13,16 @@ install_step: *std.Build.Step.InstallArtifact,
 pub fn init(b: *std.Build, cfg: *const Config, deps: *const SharedDeps) !Ghostty {
     const exe: *std.Build.Step.Compile = b.addExecutable(.{
         .name = "ghostty",
-        .root_source_file = b.path("src/main.zig"),
-        .target = cfg.target,
-        .optimize = cfg.optimize,
-        .strip = cfg.strip,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/main.zig"),
+            .target = cfg.target,
+            .optimize = cfg.optimize,
+            .strip = cfg.strip,
+            .omit_frame_pointer = cfg.strip,
+            .unwind_tables = if (cfg.strip) .none else .sync,
+        }),
+        // Crashes on x86_64 self-hosted on 0.15.1
+        .use_llvm = true,
     });
     const install_step = b.addInstallArtifact(exe, .{});
 

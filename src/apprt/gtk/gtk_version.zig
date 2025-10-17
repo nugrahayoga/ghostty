@@ -26,7 +26,7 @@ pub fn getRuntimeVersion() std.SemanticVersion {
 }
 
 pub fn logVersion() void {
-    log.info("GTK version build={} runtime={}", .{
+    log.info("GTK version build={f} runtime={f}", .{
         comptime_version,
         getRuntimeVersion(),
     });
@@ -87,6 +87,19 @@ pub inline fn runtimeAtLeast(
     }) != .lt;
 }
 
+pub inline fn runtimeUntil(
+    comptime major: u16,
+    comptime minor: u16,
+    comptime micro: u16,
+) bool {
+    const runtime_version = getRuntimeVersion();
+    return runtime_version.order(.{
+        .major = major,
+        .minor = minor,
+        .patch = micro,
+    }) == .lt;
+}
+
 test "atLeast" {
     const testing = std.testing;
 
@@ -103,5 +116,25 @@ test "atLeast" {
         try testing.expect(fun(c.GTK_MAJOR_VERSION - 1, c.GTK_MINOR_VERSION, c.GTK_MICRO_VERSION + 1));
 
         try testing.expect(fun(c.GTK_MAJOR_VERSION, c.GTK_MINOR_VERSION - 1, c.GTK_MICRO_VERSION + 1));
+    }
+}
+
+test "runtimeUntil" {
+    const testing = std.testing;
+
+    // This is an array in case we add a comptime variant.
+    const funs = &.{runtimeUntil};
+    inline for (funs) |fun| {
+        try testing.expect(!fun(c.GTK_MAJOR_VERSION, c.GTK_MINOR_VERSION, c.GTK_MICRO_VERSION));
+
+        try testing.expect(fun(c.GTK_MAJOR_VERSION, c.GTK_MINOR_VERSION, c.GTK_MICRO_VERSION + 1));
+        try testing.expect(fun(c.GTK_MAJOR_VERSION, c.GTK_MINOR_VERSION + 1, c.GTK_MICRO_VERSION));
+        try testing.expect(fun(c.GTK_MAJOR_VERSION + 1, c.GTK_MINOR_VERSION, c.GTK_MICRO_VERSION));
+
+        try testing.expect(!fun(c.GTK_MAJOR_VERSION - 1, c.GTK_MINOR_VERSION, c.GTK_MICRO_VERSION));
+        try testing.expect(!fun(c.GTK_MAJOR_VERSION - 1, c.GTK_MINOR_VERSION + 1, c.GTK_MICRO_VERSION));
+        try testing.expect(!fun(c.GTK_MAJOR_VERSION - 1, c.GTK_MINOR_VERSION, c.GTK_MICRO_VERSION + 1));
+
+        try testing.expect(!fun(c.GTK_MAJOR_VERSION, c.GTK_MINOR_VERSION - 1, c.GTK_MICRO_VERSION + 1));
     }
 }

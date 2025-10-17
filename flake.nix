@@ -2,12 +2,12 @@
   description = "👻";
 
   inputs = {
-    nixpkgs-unstable.url = "github:nixos/nixpkgs/nixpkgs-unstable";
-
     # We want to stay as up to date as possible but need to be careful that the
     # glibc versions used by our dependencies from Nix are compatible with the
     # system glibc that the user is building for.
-    nixpkgs-stable.url = "github:nixos/nixpkgs/release-24.11";
+    #
+    # We are currently on unstable to get Zig 0.15 for our package.nix
+    nixpkgs.url = "https://channels.nixos.org/nixpkgs-unstable/nixexprs.tar.xz";
     flake-utils.url = "github:numtide/flake-utils";
 
     # Used for shell.nix
@@ -19,40 +19,38 @@
     zig = {
       url = "github:mitchellh/zig-overlay";
       inputs = {
-        nixpkgs.follows = "nixpkgs-stable";
+        nixpkgs.follows = "nixpkgs";
         flake-utils.follows = "flake-utils";
-        flake-compat.follows = "";
+        flake-compat.follows = "flake-compat";
       };
     };
 
     zon2nix = {
-      url = "github:jcollie/zon2nix?ref=56c159be489cc6c0e73c3930bd908ddc6fe89613";
+      url = "github:jcollie/zon2nix?rev=bf983aa90ff169372b9fa8c02e57ea75e0b42245";
       inputs = {
-        nixpkgs.follows = "nixpkgs-unstable";
-        flake-utils.follows = "flake-utils";
+        # Don't override nixpkgs until Zig 0.15 is available in the Nix branch
+        # we are using for "normal" builds.
+        #
+        # nixpkgs.follows = "nixpkgs";
       };
     };
   };
 
   outputs = {
     self,
-    nixpkgs-unstable,
-    nixpkgs-stable,
+    nixpkgs,
     zig,
     zon2nix,
     ...
   }:
-    builtins.foldl' nixpkgs-stable.lib.recursiveUpdate {} (
+    builtins.foldl' nixpkgs.lib.recursiveUpdate {} (
       builtins.map (
         system: let
-          pkgs-stable = nixpkgs-stable.legacyPackages.${system};
-          pkgs-unstable = nixpkgs-unstable.legacyPackages.${system};
+          pkgs = nixpkgs.legacyPackages.${system};
         in {
-          devShell.${system} = pkgs-stable.callPackage ./nix/devShell.nix {
-            zig = zig.packages.${system}."0.14.0";
-            wraptest = pkgs-stable.callPackage ./nix/wraptest.nix {};
-            # remove once blueprint-compiler 0.16.0 is in the stable nixpkgs
-            blueprint-compiler = pkgs-unstable.blueprint-compiler;
+          devShell.${system} = pkgs.callPackage ./nix/devShell.nix {
+            zig = zig.packages.${system}."0.15.2";
+            wraptest = pkgs.callPackage ./nix/wraptest.nix {};
             zon2nix = zon2nix;
           };
 
@@ -63,30 +61,29 @@
               revision = self.shortRev or self.dirtyShortRev or "dirty";
             };
           in rec {
-            deps = pkgs-unstable.callPackage ./build.zig.zon.nix {};
-            ghostty-debug = pkgs-unstable.callPackage ./nix/package.nix (mkArgs "Debug");
-            ghostty-releasesafe = pkgs-unstable.callPackage ./nix/package.nix (mkArgs "ReleaseSafe");
-            ghostty-releasefast = pkgs-unstable.callPackage ./nix/package.nix (mkArgs "ReleaseFast");
+            deps = pkgs.callPackage ./build.zig.zon.nix {};
+            ghostty-debug = pkgs.callPackage ./nix/package.nix (mkArgs "Debug");
+            ghostty-releasesafe = pkgs.callPackage ./nix/package.nix (mkArgs "ReleaseSafe");
+            ghostty-releasefast = pkgs.callPackage ./nix/package.nix (mkArgs "ReleaseFast");
 
             ghostty = ghostty-releasefast;
             default = ghostty;
           };
 
-          formatter.${system} = pkgs-stable.alejandra;
+          formatter.${system} = pkgs.alejandra;
 
           apps.${system} = let
             runVM = (
               module: let
                 vm = import ./nix/vm/create.nix {
-                  inherit system module;
-                  nixpkgs = nixpkgs-unstable;
+                  inherit system module nixpkgs;
                   overlay = self.overlays.debug;
                 };
-                program = pkgs-unstable.writeShellScript "run-ghostty-vm" ''
+                program = pkgs.writeShellScript "run-ghostty-vm" ''
                   SHARED_DIR=$(pwd)
                   export SHARED_DIR
 
-                  ${pkgs-unstable.lib.getExe vm.config.system.build.vm} "$@"
+                  ${pkgs.lib.getExe vm.config.system.build.vm} "$@"
                 '';
               in {
                 type = "app";

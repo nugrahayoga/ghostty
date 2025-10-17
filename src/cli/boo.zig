@@ -1,12 +1,12 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const args = @import("args.zig");
-const Action = @import("action.zig").Action;
+const Action = @import("ghostty.zig").Action;
 const Allocator = std.mem.Allocator;
 const help_strings = @import("help_strings");
 const vaxis = @import("vaxis");
 
-const framedata = @import("framedata");
+const framedata = @import("framedata").compressed;
 
 const vxfw = vaxis.vxfw;
 
@@ -176,7 +176,7 @@ const Boo = struct {
 pub fn run(gpa: Allocator) !u8 {
     // Disable on non-desktop systems.
     switch (builtin.os.tag) {
-        .windows, .macos, .linux => {},
+        .windows, .macos, .linux, .freebsd => {},
         else => return 1,
     }
 
@@ -218,17 +218,20 @@ var frames: []const []const u8 = undefined;
 
 /// Decompress the frames into a slice of individual frames
 fn decompressFrames(gpa: Allocator) !void {
-    var fbs = std.io.fixedBufferStream(framedata.compressed);
-    var list = std.ArrayList(u8).init(gpa);
+    var src: std.Io.Reader = .fixed(framedata);
 
-    try std.compress.flate.decompress(fbs.reader(), list.writer());
-    decompressed_data = try list.toOwnedSlice();
+    // var buf: [std.compress.flate.max_window_len]u8 = undefined;
+    var decompress: std.compress.flate.Decompress = .init(&src, .raw, &.{});
 
-    var frame_list = try std.ArrayList([]const u8).initCapacity(gpa, 235);
+    var out: std.Io.Writer.Allocating = .init(gpa);
+    _ = try decompress.reader.streamRemaining(&out.writer);
+    decompressed_data = try out.toOwnedSlice();
+
+    var frame_list: std.ArrayList([]const u8) = try .initCapacity(gpa, 235);
 
     var frame_iter = std.mem.splitScalar(u8, decompressed_data, '\x01');
     while (frame_iter.next()) |frame| {
-        try frame_list.append(frame);
+        try frame_list.append(gpa, frame);
     }
-    frames = try frame_list.toOwnedSlice();
+    frames = try frame_list.toOwnedSlice(gpa);
 }

@@ -1,16 +1,18 @@
 # Norwegian Bokmal translations for com.mitchellh.ghostty package.
-# Copyright (C) 2025 Mitchell Hashimoto
+# Copyright (C) 2025 Mitchell Hashimoto, Ghostty contributors
 # This file is distributed under the same license as the com.mitchellh.ghostty package.
-# Hanna Rose <hanna@hanna.lol>, 2025.
+# Hanna Rose <me@hanna.lol>, 2025.
 # Uzair Aftab <uzaaft@outlook.com>, 2025.
 # Christoffer Tønnessen <christoffer@cto.gg>, 2025.
+# cryptocode <cryptocode@zolo.io>, 2025.
 #
 msgid ""
 msgstr ""
 "Project-Id-Version: com.mitchellh.ghostty\n"
 "Report-Msgid-Bugs-To: m@mitchellh.com\n"
-"PO-Revision-Date: 2025-03-19 09:52+0100\n"
-"Last-Translator: Christoffer Tønnessen <christoffer@cto.gg>\n"
+"POT-Creation-Date: 2025-07-22 17:18+0000\n"
+"PO-Revision-Date: 2025-08-23 12:52+0000\n"
+"Last-Translator: Hanna Rose <me@hanna.lol>\n"
 "Language-Team: Norwegian Bokmal <l10n-no@lister.huftis.org>\n"
 "Language: nb\n"
 "MIME-Version: 1.0\n"
@@ -27,7 +29,8 @@ msgid "Leave blank to restore the default title."
 msgstr "Blank verdi gjenoppretter standardtittelen."
 
 #: src/apprt/gtk/ui/1.5/prompt-title-dialog.blp:9
-#: src/apprt/gtk/ui/1.5/ccw-paste.blp:10 src/apprt/gtk/CloseDialog.zig:44
+#: src/apprt/gtk/ui/1.5/ccw-paste.blp:10 src/apprt/gtk/ui/1.2/ccw-paste.blp:10
+#: src/apprt/gtk/CloseDialog.zig:44
 msgid "Cancel"
 msgstr "Avbryt"
 
@@ -36,26 +39,58 @@ msgid "OK"
 msgstr "OK"
 
 #: src/apprt/gtk/ui/1.5/config-errors-dialog.blp:5
+#: src/apprt/gtk/ui/1.2/config-errors-dialog.blp:5
 msgid "Configuration Errors"
 msgstr "Konfigurasjonsfeil"
 
 #: src/apprt/gtk/ui/1.5/config-errors-dialog.blp:6
+#: src/apprt/gtk/ui/1.2/config-errors-dialog.blp:6
 msgid ""
 "One or more configuration errors were found. Please review the errors below, "
 "and either reload your configuration or ignore these errors."
 msgstr ""
-"Én eller flere konfigurasjonsfeil ble funnet. Vennligst gjennomgå feilene under, "
-"og enten last konfigurasjonen din på nytt eller ignorer disse feilene."
+"Én eller flere konfigurasjonsfeil ble funnet. Vennligst gjennomgå feilene "
+"under, og enten last konfigurasjonen din på nytt eller ignorer disse feilene."
 
 #: src/apprt/gtk/ui/1.5/config-errors-dialog.blp:9
+#: src/apprt/gtk/ui/1.2/config-errors-dialog.blp:9
 msgid "Ignore"
 msgstr "Ignorer"
 
 #: src/apprt/gtk/ui/1.5/config-errors-dialog.blp:10
 #: src/apprt/gtk/ui/1.0/menu-surface-context_menu.blp:97
-#: src/apprt/gtk/ui/1.0/menu-window-titlebar_menu.blp:95
+#: src/apprt/gtk/ui/1.0/menu-window-titlebar_menu.blp:100
+#: src/apprt/gtk/ui/1.2/config-errors-dialog.blp:10
 msgid "Reload Configuration"
 msgstr "Last konfigurasjon på nytt"
+
+#: src/apprt/gtk/ui/1.0/menu-headerbar-split_menu.blp:6
+#: src/apprt/gtk/ui/1.0/menu-surface-context_menu.blp:38
+#: src/apprt/gtk/ui/1.0/menu-window-titlebar_menu.blp:50
+msgid "Split Up"
+msgstr "Del oppover"
+
+#: src/apprt/gtk/ui/1.0/menu-headerbar-split_menu.blp:11
+#: src/apprt/gtk/ui/1.0/menu-surface-context_menu.blp:43
+#: src/apprt/gtk/ui/1.0/menu-window-titlebar_menu.blp:55
+msgid "Split Down"
+msgstr "Del nedover"
+
+#: src/apprt/gtk/ui/1.0/menu-headerbar-split_menu.blp:16
+#: src/apprt/gtk/ui/1.0/menu-surface-context_menu.blp:48
+#: src/apprt/gtk/ui/1.0/menu-window-titlebar_menu.blp:60
+msgid "Split Left"
+msgstr "Del til venstre"
+
+#: src/apprt/gtk/ui/1.0/menu-headerbar-split_menu.blp:21
+#: src/apprt/gtk/ui/1.0/menu-surface-context_menu.blp:53
+#: src/apprt/gtk/ui/1.0/menu-window-titlebar_menu.blp:65
+msgid "Split Right"
+msgstr "Del til høyre"
+
+#: src/apprt/gtk/ui/1.5/command-palette.blp:16
+msgid "Execute a command…"
+msgstr "Kjør en kommando..."
 
 #: src/apprt/gtk/ui/1.0/menu-surface-context_menu.blp:6
 #: src/apprt/gtk/ui/1.0/menu-window-titlebar_menu.blp:6
@@ -64,7 +99,7 @@ msgstr "Kopier"
 
 #: src/apprt/gtk/ui/1.0/menu-surface-context_menu.blp:11
 #: src/apprt/gtk/ui/1.0/menu-window-titlebar_menu.blp:11
-#: src/apprt/gtk/ui/1.5/ccw-paste.blp:11
+#: src/apprt/gtk/ui/1.5/ccw-paste.blp:11 src/apprt/gtk/ui/1.2/ccw-paste.blp:11
 msgid "Paste"
 msgstr "Lim inn"
 
@@ -81,32 +116,12 @@ msgstr "Nullstill"
 #: src/apprt/gtk/ui/1.0/menu-surface-context_menu.blp:30
 #: src/apprt/gtk/ui/1.0/menu-window-titlebar_menu.blp:42
 msgid "Split"
-msgstr "Splitt"
+msgstr "Del vindu"
 
 #: src/apprt/gtk/ui/1.0/menu-surface-context_menu.blp:33
 #: src/apprt/gtk/ui/1.0/menu-window-titlebar_menu.blp:45
 msgid "Change Title…"
 msgstr "Endre tittel…"
-
-#: src/apprt/gtk/ui/1.0/menu-surface-context_menu.blp:38
-#: src/apprt/gtk/ui/1.0/menu-window-titlebar_menu.blp:50
-msgid "Split Up"
-msgstr "Splitt opp"
-
-#: src/apprt/gtk/ui/1.0/menu-surface-context_menu.blp:43
-#: src/apprt/gtk/ui/1.0/menu-window-titlebar_menu.blp:55
-msgid "Split Down"
-msgstr "Splitt ned"
-
-#: src/apprt/gtk/ui/1.0/menu-surface-context_menu.blp:48
-#: src/apprt/gtk/ui/1.0/menu-window-titlebar_menu.blp:60
-msgid "Split Left"
-msgstr "Splitt venstre"
-
-#: src/apprt/gtk/ui/1.0/menu-surface-context_menu.blp:53
-#: src/apprt/gtk/ui/1.0/menu-window-titlebar_menu.blp:65
-msgid "Split Right"
-msgstr "Splitt høyre"
 
 #: src/apprt/gtk/ui/1.0/menu-surface-context_menu.blp:59
 msgid "Tab"
@@ -114,7 +129,7 @@ msgstr "Fane"
 
 #: src/apprt/gtk/ui/1.0/menu-surface-context_menu.blp:62
 #: src/apprt/gtk/ui/1.0/menu-window-titlebar_menu.blp:30
-#: src/apprt/gtk/Window.zig:246
+#: src/apprt/gtk/Window.zig:265
 msgid "New Tab"
 msgstr "Ny fane"
 
@@ -142,29 +157,36 @@ msgid "Config"
 msgstr "Konfigurasjon"
 
 #: src/apprt/gtk/ui/1.0/menu-surface-context_menu.blp:92
-#: src/apprt/gtk/ui/1.0/menu-window-titlebar_menu.blp:90
+#: src/apprt/gtk/ui/1.0/menu-window-titlebar_menu.blp:95
 msgid "Open Configuration"
 msgstr "Åpne konfigurasjon"
 
 #: src/apprt/gtk/ui/1.0/menu-window-titlebar_menu.blp:85
+msgid "Command Palette"
+msgstr "Kommandopalett"
+
+#: src/apprt/gtk/ui/1.0/menu-window-titlebar_menu.blp:90
 msgid "Terminal Inspector"
 msgstr "Terminalinspektør"
 
-#: src/apprt/gtk/ui/1.0/menu-window-titlebar_menu.blp:102
-#: src/apprt/gtk/Window.zig:960
+#: src/apprt/gtk/ui/1.0/menu-window-titlebar_menu.blp:107
+#: src/apprt/gtk/Window.zig:1038
 msgid "About Ghostty"
 msgstr "Om Ghostty"
 
-#: src/apprt/gtk/ui/1.0/menu-window-titlebar_menu.blp:107
+#: src/apprt/gtk/ui/1.0/menu-window-titlebar_menu.blp:112
 msgid "Quit"
 msgstr "Avslutt"
 
 #: src/apprt/gtk/ui/1.5/ccw-osc-52-read.blp:6
 #: src/apprt/gtk/ui/1.5/ccw-osc-52-write.blp:6
+#: src/apprt/gtk/ui/1.2/ccw-osc-52-read.blp:6
+#: src/apprt/gtk/ui/1.2/ccw-osc-52-write.blp:6
 msgid "Authorize Clipboard Access"
-msgstr "Gi tilgang til utklippstavle"
+msgstr "Gi tilgang til utklippstavlen"
 
 #: src/apprt/gtk/ui/1.5/ccw-osc-52-read.blp:7
+#: src/apprt/gtk/ui/1.2/ccw-osc-52-read.blp:7
 msgid ""
 "An application is attempting to read from the clipboard. The current "
 "clipboard contents are shown below."
@@ -174,27 +196,42 @@ msgstr ""
 
 #: src/apprt/gtk/ui/1.5/ccw-osc-52-read.blp:10
 #: src/apprt/gtk/ui/1.5/ccw-osc-52-write.blp:10
+#: src/apprt/gtk/ui/1.2/ccw-osc-52-read.blp:10
+#: src/apprt/gtk/ui/1.2/ccw-osc-52-write.blp:10
 msgid "Deny"
 msgstr "Avslå"
 
 #: src/apprt/gtk/ui/1.5/ccw-osc-52-read.blp:11
 #: src/apprt/gtk/ui/1.5/ccw-osc-52-write.blp:11
+#: src/apprt/gtk/ui/1.2/ccw-osc-52-read.blp:11
+#: src/apprt/gtk/ui/1.2/ccw-osc-52-write.blp:11
 msgid "Allow"
 msgstr "Tillat"
 
+#: src/apprt/gtk/ui/1.5/ccw-osc-52-read.blp:81
+#: src/apprt/gtk/ui/1.5/ccw-osc-52-write.blp:77
+msgid "Remember choice for this split"
+msgstr "Husk valget for dette delte vinduet?"
+
+#: src/apprt/gtk/ui/1.5/ccw-osc-52-read.blp:82
+#: src/apprt/gtk/ui/1.5/ccw-osc-52-write.blp:78
+msgid "Reload configuration to show this prompt again"
+msgstr "Last inn konfigurasjonen på nytt for å vise denne meldingen igjen"
+
 #: src/apprt/gtk/ui/1.5/ccw-osc-52-write.blp:7
+#: src/apprt/gtk/ui/1.2/ccw-osc-52-write.blp:7
 msgid ""
 "An application is attempting to write to the clipboard. The current "
 "clipboard contents are shown below."
 msgstr ""
-"En applikasjon er forsøker å skrive til utklippstavlen. Gjeldende "
+"En applikasjon forsøker å skrive til utklippstavlen. Gjeldende "
 "utklippstavleinnhold er vist nedenfor."
 
-#: src/apprt/gtk/ui/1.5/ccw-paste.blp:6
+#: src/apprt/gtk/ui/1.5/ccw-paste.blp:6 src/apprt/gtk/ui/1.2/ccw-paste.blp:6
 msgid "Warning: Potentially Unsafe Paste"
 msgstr "Adarsel: Lim inn kan være utrygt"
 
-#: src/apprt/gtk/ui/1.5/ccw-paste.blp:7
+#: src/apprt/gtk/ui/1.5/ccw-paste.blp:7 src/apprt/gtk/ui/1.2/ccw-paste.blp:7
 msgid ""
 "Pasting this text into the terminal may be dangerous as it looks like some "
 "commands may be executed."
@@ -202,15 +239,7 @@ msgstr ""
 "Det ser ut som at kommandoer vil bli kjørt hvis du limer inn dette, vurder "
 "om du mener det er trygt."
 
-#: src/apprt/gtk/inspector.zig:144
-msgid "Ghostty: Terminal Inspector"
-msgstr "Ghostty: Terminalinspektør"
-
-#: src/apprt/gtk/Surface.zig:1243
-msgid "Copied to clipboard"
-msgstr "Kopiert til utklippstavle"
-
-#: src/apprt/gtk/CloseDialog.zig:47
+#: src/apprt/gtk/CloseDialog.zig:47 src/apprt/gtk/Surface.zig:2531
 msgid "Close"
 msgstr "Lukk"
 
@@ -228,7 +257,7 @@ msgstr "Lukk fane?"
 
 #: src/apprt/gtk/CloseDialog.zig:90
 msgid "Close Split?"
-msgstr "Lukk splitt?"
+msgstr "Lukk delt vindu?"
 
 #: src/apprt/gtk/CloseDialog.zig:96
 msgid "All terminal sessions will be terminated."
@@ -246,23 +275,47 @@ msgstr "Alle terminaløkter i denne fanen vil bli avsluttet."
 msgid "The currently running process in this split will be terminated."
 msgstr "Den kjørende prosessen for denne splitten vil bli avsluttet."
 
-#: src/apprt/gtk/Window.zig:200
+#: src/apprt/gtk/Surface.zig:1266
+msgid "Copied to clipboard"
+msgstr "Kopiert til utklippstavlen"
+
+#: src/apprt/gtk/Surface.zig:1268
+msgid "Cleared clipboard"
+msgstr "Utklippstavle tømt"
+
+#: src/apprt/gtk/Surface.zig:2525
+msgid "Command succeeded"
+msgstr "Kommando lyktes"
+
+#: src/apprt/gtk/Surface.zig:2527
+msgid "Command failed"
+msgstr "Kommando mislyktes"
+
+#: src/apprt/gtk/Window.zig:216
 msgid "Main Menu"
 msgstr "Hovedmeny"
 
-#: src/apprt/gtk/Window.zig:221
+#: src/apprt/gtk/Window.zig:239
 msgid "View Open Tabs"
 msgstr "Se åpne faner"
 
-#: src/apprt/gtk/Window.zig:295
+#: src/apprt/gtk/Window.zig:266
+msgid "New Split"
+msgstr "Del opp vindu"
+
+#: src/apprt/gtk/Window.zig:329
 msgid ""
 "⚠️ You're running a debug build of Ghostty! Performance will be degraded."
 msgstr "⚠️ Du kjører et debug-bygg av Ghostty. Debug-bygg har redusert ytelse."
 
-#: src/apprt/gtk/Window.zig:725
+#: src/apprt/gtk/Window.zig:775
 msgid "Reloaded the configuration"
 msgstr "Konfigurasjonen ble lastet på nytt"
 
-#: src/apprt/gtk/Window.zig:941
+#: src/apprt/gtk/Window.zig:1019
 msgid "Ghostty Developers"
 msgstr "Ghostty-utviklere"
+
+#: src/apprt/gtk/inspector.zig:144
+msgid "Ghostty: Terminal Inspector"
+msgstr "Ghostty: Terminalinspektør"

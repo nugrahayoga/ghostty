@@ -254,7 +254,7 @@ fn loadWebCanvas(
     opts: font.face.Options,
 ) !Face {
     const wc = self.wc.?;
-    return try Face.initNamed(wc.alloc, wc.font_str, opts, wc.presentation);
+    return try .initNamed(wc.alloc, wc.font_str, opts, wc.presentation);
 }
 
 /// Returns true if this face can satisfy the given codepoint and
@@ -407,12 +407,13 @@ test "fontconfig" {
     const alloc = testing.allocator;
 
     // Load freetype
-    var lib = try Library.init();
+    var lib = try Library.init(alloc);
     defer lib.deinit();
 
     // Get a deferred face from fontconfig
     var def = def: {
         var fc = discovery.Fontconfig.init();
+        defer fc.deinit();
         var it = try fc.discover(alloc, .{ .family = "monospace", .size = 12 });
         defer it.deinit();
         break :def (try it.next()).?;
@@ -425,7 +426,8 @@ test "fontconfig" {
     try testing.expect(n.len > 0);
 
     // Load it and verify it works
-    const face = try def.load(lib, .{ .size = .{ .points = 12 } });
+    var face = try def.load(lib, .{ .size = .{ .points = 12 } });
+    defer face.deinit();
     try testing.expect(face.glyphIndex(' ') != null);
 }
 
@@ -437,7 +439,7 @@ test "coretext" {
     const alloc = testing.allocator;
 
     // Load freetype
-    var lib = try Library.init();
+    var lib = try Library.init(alloc);
     defer lib.deinit();
 
     // Get a deferred face from fontconfig
@@ -456,6 +458,7 @@ test "coretext" {
     try testing.expect(n.len > 0);
 
     // Load it and verify it works
-    const face = try def.load(lib, .{ .size = .{ .points = 12 } });
+    var face = try def.load(lib, .{ .size = .{ .points = 12 } });
+    defer face.deinit();
     try testing.expect(face.glyphIndex(' ') != null);
 }
