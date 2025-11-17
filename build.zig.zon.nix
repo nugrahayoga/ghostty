@@ -163,11 +163,11 @@ in
       };
     }
     {
-      name = "N-V-__8AALIsAwAgV4B4dOJYBqTmOftgMMm4D4BxFPzns5Bl";
+      name = "N-V-__8AAPZCAwDJ0OsIn2nbr3FMvBw68oiv-hC2pFuY1eLN";
       path = fetchZigArtifact {
         name = "iterm2_themes";
-        url = "https://github.com/mbadolato/iTerm2-Color-Schemes/releases/download/release-20251006-150522-c07f0e8/ghostty-themes.tgz";
-        hash = "sha256-yTN88FFxGVeK07fSQK+jWy9XLAln7f/W+xcDH+tLOEY=";
+        url = "https://github.com/mbadolato/iTerm2-Color-Schemes/releases/download/release-20251110-150531-d5f3d53/ghostty-themes.tgz";
+        hash = "sha256-VZq3L/cAAu7kLA5oqJYNjAZApoblfBtAzfdKVOuJPQI=";
       };
     }
     {
@@ -267,11 +267,11 @@ in
       };
     }
     {
-      name = "uucode-0.1.0-ZZjBPjQHQADuCy1VMWftjrMl3iWqgMpUugWVQJG6_7xT";
+      name = "uucode-0.1.0-ZZjBPl_mQwDHQowHOzXwgTPhAqcFekfYpAeUfeHZNCl3";
       path = fetchZigArtifact {
         name = "uucode";
-        url = "https://deps.files.ghostty.org/uucode-f81f8ef8518b8ec5a7fca30ec5fdbc76cc6197df.tar.gz";
-        hash = "sha256-VomSYOF8fRJwb/8GtVG/QqR6c95zSkQt4649C/4KXAc=";
+        url = "https://github.com/jacobsandlund/uucode/archive/b309dfb4e25a38201d7b300b201a698e02283862.tar.gz";
+        hash = "sha256-jvko1MdWr1OG4P58KjdB1JMnWy4EbrO3xIkV8fiQkC0=";
       };
     }
     {

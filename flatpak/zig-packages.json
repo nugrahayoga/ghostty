@@ -61,9 +61,9 @@
   },
   {
     "type": "archive",
-    "url": "https://github.com/mbadolato/iTerm2-Color-Schemes/releases/download/release-20251006-150522-c07f0e8/ghostty-themes.tgz",
-    "dest": "vendor/p/N-V-__8AALIsAwAgV4B4dOJYBqTmOftgMMm4D4BxFPzns5Bl",
-    "sha256": "c9337cf0517119578ad3b7d240afa35b2f572c0967edffd6fb17031feb4b3846"
+    "url": "https://github.com/mbadolato/iTerm2-Color-Schemes/releases/download/release-20251110-150531-d5f3d53/ghostty-themes.tgz",
+    "dest": "vendor/p/N-V-__8AAPZCAwDJ0OsIn2nbr3FMvBw68oiv-hC2pFuY1eLN",
+    "sha256": "559ab72ff70002eee42c0e68a8960d8c0640a686e57c1b40cdf74a54eb893d02"
   },
   {
     "type": "archive",
@@ -139,9 +139,9 @@
   },
   {
     "type": "archive",
-    "url": "https://deps.files.ghostty.org/uucode-f81f8ef8518b8ec5a7fca30ec5fdbc76cc6197df.tar.gz",
-    "dest": "vendor/p/uucode-0.1.0-ZZjBPjQHQADuCy1VMWftjrMl3iWqgMpUugWVQJG6_7xT",
-    "sha256": "56899260e17c7d12706fff06b551bf42a47a73de734a442de3ae3d0bfe0a5c07"
+    "url": "https://github.com/jacobsandlund/uucode/archive/b309dfb4e25a38201d7b300b201a698e02283862.tar.gz",
+    "dest": "vendor/p/uucode-0.1.0-ZZjBPl_mQwDHQowHOzXwgTPhAqcFekfYpAeUfeHZNCl3",
+    "sha256": "8ef928d4c756af5386e0fe7c2a3741d493275b2e046eb3b7c48915f1f890902d"
   },
   {
     "type": "archive",

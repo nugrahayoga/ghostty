@@ -119,6 +119,7 @@ struct TerminalView<ViewModel: TerminalViewModel>: View {
                     UpdateOverlay()
                 }
             }
+            .frame(maxWidth: .greatestFiniteMagnitude, maxHeight: .greatestFiniteMagnitude)
         }
     }
 }

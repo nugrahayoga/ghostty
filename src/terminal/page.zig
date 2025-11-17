@@ -11,7 +11,10 @@ const color = @import("color.zig");
 const hyperlink = @import("hyperlink.zig");
 const kitty = @import("kitty.zig");
 const sgr = @import("sgr.zig");
-const style = @import("style.zig");
+const stylepkg = @import("style.zig");
+const Style = stylepkg.Style;
+const StyleId = stylepkg.Id;
+const StyleSet = stylepkg.Set;
 const size = @import("size.zig");
 const getOffset = size.getOffset;
 const Offset = size.Offset;
@@ -86,7 +89,7 @@ pub const Page = struct {
         assert(std.heap.page_size_min % @max(
             @alignOf(Row),
             @alignOf(Cell),
-            style.Set.base_align.toByteUnits(),
+            StyleSet.base_align.toByteUnits(),
         ) == 0);
     }
 
@@ -124,7 +127,7 @@ pub const Page = struct {
     grapheme_map: GraphemeMap,
 
     /// The available set of styles in use on this page.
-    styles: style.Set,
+    styles: StyleSet,
 
     /// The structures used for tracking hyperlinks within the page.
     /// The map maps cell offsets to hyperlink IDs and the IDs are in
@@ -236,7 +239,7 @@ pub const Page = struct {
             .rows = rows,
             .cells = cells,
             .dirty = buf.member(usize, l.dirty_start),
-            .styles = style.Set.init(
+            .styles = StyleSet.init(
                 buf.add(l.styles_start),
                 l.styles_layout,
                 .{},
@@ -372,7 +375,7 @@ pub const Page = struct {
         const alloc = arena.allocator();
 
         var graphemes_seen: usize = 0;
-        var styles_seen = std.AutoHashMap(style.Id, usize).init(alloc);
+        var styles_seen = std.AutoHashMap(StyleId, usize).init(alloc);
         defer styles_seen.deinit();
         var hyperlinks_seen = std.AutoHashMap(hyperlink.Id, usize).init(alloc);
         defer hyperlinks_seen.deinit();
@@ -409,7 +412,7 @@ pub const Page = struct {
                     }
                 }
 
-                if (cell.style_id != style.default_id) {
+                if (cell.style_id != stylepkg.default_id) {
                     // If a cell has a style, it must be present in the styles
                     // set. Accessing it with `get` asserts that.
                     _ = self.styles.get(
@@ -767,7 +770,7 @@ pub const Page = struct {
                 for (other_cells) |cell| {
                     assert(!cell.hasGrapheme());
                     assert(!cell.hyperlink);
-                    assert(cell.style_id == style.default_id);
+                    assert(cell.style_id == stylepkg.default_id);
                 }
             }
 
@@ -782,7 +785,7 @@ pub const Page = struct {
                 // hit an integrity check if we have to return an error because
                 // the page can't fit the new memory.
                 dst_cell.hyperlink = false;
-                dst_cell.style_id = style.default_id;
+                dst_cell.style_id = stylepkg.default_id;
                 if (dst_cell.content_tag == .codepoint_grapheme) {
                     dst_cell.content_tag = .codepoint;
                 }
@@ -791,7 +794,7 @@ pub const Page = struct {
                     // To prevent integrity checks flipping. This will
                     // get fixed up when we check the style id below.
                     if (build_options.slow_runtime_safety) {
-                        dst_cell.style_id = style.default_id;
+                        dst_cell.style_id = stylepkg.default_id;
                     }
 
                     // Copy the grapheme codepoints
@@ -867,7 +870,7 @@ pub const Page = struct {
 
                     try self.setHyperlink(dst_row, dst_cell, dst_id);
                 }
-                if (src_cell.style_id != style.default_id) style: {
+                if (src_cell.style_id != stylepkg.default_id) style: {
                     dst_row.styled = true;
 
                     if (other == self) {
@@ -995,7 +998,7 @@ pub const Page = struct {
 
         // The destination row has styles if any of the cells are styled
         if (!dst_row.styled) dst_row.styled = styled: for (dst_cells) |c| {
-            if (c.style_id != style.default_id) break :styled true;
+            if (c.style_id != stylepkg.default_id) break :styled true;
         } else false;
 
         // Clear our source row now that the copy is complete. We can NOT
@@ -1101,7 +1104,7 @@ pub const Page = struct {
 
         if (row.styled) {
             for (cells) |*cell| {
-                if (cell.style_id == style.default_id) continue;
+                if (cell.style_id == stylepkg.default_id) continue;
 
                 self.styles.release(self.memory, cell.style_id);
             }
@@ -1195,7 +1198,7 @@ pub const Page = struct {
         };
         errdefer self.string_alloc.free(
             self.memory,
-            page_uri.offset.ptr(self.memory)[0..page_uri.len],
+            page_uri.slice(self.memory),
         );
 
         // Allocate an ID for our page memory if we have to.
@@ -1225,7 +1228,7 @@ pub const Page = struct {
             .implicit => {},
             .explicit => |slice| self.string_alloc.free(
                 self.memory,
-                slice.offset.ptr(self.memory)[0..slice.len],
+                slice.slice(self.memory),
             ),
         };
 
@@ -1418,7 +1421,7 @@ pub const Page = struct {
         // most graphemes to fit within our chunk size.
         const cps = try self.grapheme_alloc.alloc(u21, self.memory, slice.len + 1);
         errdefer self.grapheme_alloc.free(self.memory, cps);
-        const old_cps = slice.offset.ptr(self.memory)[0..slice.len];
+        const old_cps = slice.slice(self.memory);
         fastmem.copy(u21, cps[0..old_cps.len], old_cps);
         cps[slice.len] = cp;
         slice.* = .{
@@ -1437,7 +1440,7 @@ pub const Page = struct {
         const cell_offset = getOffset(Cell, self.memory, cell);
         const map = self.grapheme_map.map(self.memory);
         const slice = map.get(cell_offset) orelse return null;
-        return slice.offset.ptr(self.memory)[0..slice.len];
+        return slice.slice(self.memory);
     }
 
     /// Move the graphemes from one cell to another. This can't fail
@@ -1472,7 +1475,7 @@ pub const Page = struct {
         const entry = map.getEntry(cell_offset).?;
 
         // Free our grapheme data
-        const cps = entry.value_ptr.offset.ptr(self.memory)[0..entry.value_ptr.len];
+        const cps = entry.value_ptr.slice(self.memory);
         self.grapheme_alloc.free(self.memory, cps);
 
         // Remove the entry
@@ -1496,193 +1499,6 @@ pub const Page = struct {
     /// size but the number of unique cells that can have grapheme data.
     pub inline fn graphemeCapacity(self: *const Page) usize {
         return self.grapheme_map.map(self.memory).capacity();
-    }
-
-    /// Options for encoding the page as UTF-8.
-    pub const EncodeUtf8Options = struct {
-        /// The range of rows to encode. If end_y is null, then it will
-        /// encode to the end of the page.
-        start_y: size.CellCountInt = 0,
-        end_y: ?size.CellCountInt = null,
-
-        /// If true, this will unwrap soft-wrapped lines. If false, this will
-        /// dump the screen as it is visually seen in a rendered window.
-        unwrap: bool = true,
-
-        /// Preceding state from encoding the prior page. Used to preserve
-        /// blanks properly across multiple pages.
-        preceding: TrailingUtf8State = .{},
-
-        /// If non-null, this will be cleared and filled with the x/y
-        /// coordinates of each byte in the UTF-8 encoded output.
-        /// The index in the array is the byte offset in the output
-        /// where 0 is the cursor of the writer when the function is
-        /// called.
-        cell_map: ?*CellMap = null,
-
-        /// Trailing state for UTF-8 encoding.
-        pub const TrailingUtf8State = struct {
-            rows: usize = 0,
-            cells: usize = 0,
-        };
-    };
-
-    /// See cell_map
-    pub const CellMap = struct {
-        alloc: Allocator,
-        map: std.ArrayList(CellMapEntry),
-
-        pub fn init(alloc: Allocator) CellMap {
-            return .{
-                .alloc = alloc,
-                .map = .empty,
-            };
-        }
-
-        pub fn deinit(self: *CellMap) void {
-            self.map.deinit(self.alloc);
-        }
-    };
-
-    /// The x/y coordinate of a single cell in the cell map.
-    pub const CellMapEntry = struct {
-        y: size.CellCountInt,
-        x: size.CellCountInt,
-    };
-
-    /// Encode the page contents as UTF-8.
-    ///
-    /// If preceding is non-null, then it will be used to initialize our
-    /// blank rows/cells count so that we can accumulate blanks across
-    /// multiple pages.
-    ///
-    /// Note: Many tests for this function are done via Screen.dumpString
-    /// tests since that function is a thin wrapper around this one and
-    /// it makes it easier to test input contents.
-    pub fn encodeUtf8(
-        self: *const Page,
-        writer: *std.Io.Writer,
-        opts: EncodeUtf8Options,
-    ) anyerror!EncodeUtf8Options.TrailingUtf8State {
-        var blank_rows: usize = opts.preceding.rows;
-        var blank_cells: usize = opts.preceding.cells;
-
-        const start_y: size.CellCountInt = opts.start_y;
-        const end_y: size.CellCountInt = opts.end_y orelse self.size.rows;
-
-        // We can probably avoid this by doing the logic below in a different
-        // way. The reason this exists is so that when we end a non-blank
-        // line with a newline, we can correctly map the cell map over to
-        // the correct x value.
-        //
-        // For example "A\nB". The cell map for "\n" should be (1, 0).
-        // This is tested in Screen.zig so feel free to refactor this.
-        var last_x: size.CellCountInt = 0;
-
-        for (start_y..end_y) |y_usize| {
-            const y: size.CellCountInt = @intCast(y_usize);
-            const row: *Row = self.getRow(y);
-            const cells: []const Cell = self.getCells(row);
-
-            // If this row is blank, accumulate to avoid a bunch of extra
-            // work later. If it isn't blank, make sure we dump all our
-            // blanks.
-            if (!Cell.hasTextAny(cells)) {
-                blank_rows += 1;
-                continue;
-            }
-            for (1..blank_rows + 1) |i| {
-                try writer.writeByte('\n');
-
-                // This is tested in Screen.zig, i.e. one test is
-                // "cell map with newlines"
-                if (opts.cell_map) |cell_map| {
-                    try cell_map.map.append(cell_map.alloc, .{
-                        .x = last_x,
-                        .y = @intCast(y - blank_rows + i - 1),
-                    });
-                    last_x = 0;
-                }
-            }
-            blank_rows = 0;
-
-            // If we're not wrapped, we always add a newline so after
-            // the row is printed we can add a newline.
-            if (!row.wrap or !opts.unwrap) blank_rows += 1;
-
-            // If the row doesn't continue a wrap then we need to reset
-            // our blank cell count.
-            if (!row.wrap_continuation or !opts.unwrap) blank_cells = 0;
-
-            // Go through each cell and print it
-            for (cells, 0..) |*cell, x_usize| {
-                const x: size.CellCountInt = @intCast(x_usize);
-
-                // Skip spacers
-                switch (cell.wide) {
-                    .narrow, .wide => {},
-                    .spacer_head, .spacer_tail => continue,
-                }
-
-                // If we have a zero value, then we accumulate a counter. We
-                // only want to turn zero values into spaces if we have a non-zero
-                // char sometime later.
-                if (!cell.hasText()) {
-                    blank_cells += 1;
-                    continue;
-                }
-                if (blank_cells > 0) {
-                    try writer.splatByteAll(' ', blank_cells);
-                    if (opts.cell_map) |cell_map| {
-                        for (0..blank_cells) |i| try cell_map.map.append(cell_map.alloc, .{
-                            .x = @intCast(x - blank_cells + i),
-                            .y = y,
-                        });
-                    }
-
-                    blank_cells = 0;
-                }
-
-                switch (cell.content_tag) {
-                    .codepoint => {
-                        try writer.print("{u}", .{cell.content.codepoint});
-                        if (opts.cell_map) |cell_map| {
-                            last_x = x + 1;
-                            try cell_map.map.append(cell_map.alloc, .{
-                                .x = x,
-                                .y = y,
-                            });
-                        }
-                    },
-
-                    .codepoint_grapheme => {
-                        try writer.print("{u}", .{cell.content.codepoint});
-                        if (opts.cell_map) |cell_map| {
-                            last_x = x + 1;
-                            try cell_map.map.append(cell_map.alloc, .{
-                                .x = x,
-                                .y = y,
-                            });
-                        }
-
-                        for (self.lookupGrapheme(cell).?) |cp| {
-                            try writer.print("{u}", .{cp});
-                            if (opts.cell_map) |cell_map| try cell_map.map.append(cell_map.alloc, .{
-                                .x = x,
-                                .y = y,
-                            });
-                        }
-                    },
-
-                    // Unreachable since we do hasText() above
-                    .bg_color_palette,
-                    .bg_color_rgb,
-                    => unreachable,
-                }
-            }
-        }
-
-        return .{ .rows = blank_rows, .cells = blank_cells };
     }
 
     /// Returns the bitset for the dirty bits on this page.
@@ -1720,7 +1536,7 @@ pub const Page = struct {
         dirty_start: usize,
         dirty_size: usize,
         styles_start: usize,
-        styles_layout: style.Set.Layout,
+        styles_layout: StyleSet.Layout,
         grapheme_alloc_start: usize,
         grapheme_alloc_layout: GraphemeAlloc.Layout,
         grapheme_map_start: usize,
@@ -1756,8 +1572,8 @@ pub const Page = struct {
         const dirty_start = alignForward(usize, cells_end, @alignOf(usize));
         const dirty_end: usize = dirty_start + (dirty_usize_length * @sizeOf(usize));
 
-        const styles_layout: style.Set.Layout = .init(cap.styles);
-        const styles_start = alignForward(usize, dirty_end, style.Set.base_align.toByteUnits());
+        const styles_layout: StyleSet.Layout = .init(cap.styles);
+        const styles_start = alignForward(usize, dirty_end, StyleSet.base_align.toByteUnits());
         const styles_end = styles_start + styles_layout.total_size;
 
         const grapheme_alloc_layout = GraphemeAlloc.layout(cap.grapheme_bytes);
@@ -1886,7 +1702,7 @@ pub const Capacity = struct {
             const string_alloc_start = alignBackward(usize, hyperlink_set_start - layout.string_alloc_layout.total_size, StringAlloc.base_align.toByteUnits());
             const grapheme_map_start = alignBackward(usize, string_alloc_start - layout.grapheme_map_layout.total_size, GraphemeMap.base_align.toByteUnits());
             const grapheme_alloc_start = alignBackward(usize, grapheme_map_start - layout.grapheme_alloc_layout.total_size, GraphemeAlloc.base_align.toByteUnits());
-            const styles_start = alignBackward(usize, grapheme_alloc_start - layout.styles_layout.total_size, style.Set.base_align.toByteUnits());
+            const styles_start = alignBackward(usize, grapheme_alloc_start - layout.styles_layout.total_size, StyleSet.base_align.toByteUnits());
 
             // The size per row is:
             //   - The row metadata itself
@@ -2014,7 +1830,7 @@ pub const Cell = packed struct(u64) {
 
     /// The style ID to use for this cell within the style map. Zero
     /// is always the default style so no lookup is required.
-    style_id: style.Id = 0,
+    style_id: StyleId = 0,
 
     /// The wide property of this cell, for wide characters. Characters in
     /// a terminal grid can only be 1 or 2 cells wide. A wide character
@@ -2123,7 +1939,7 @@ pub const Cell = packed struct(u64) {
     }
 
     pub fn hasStyling(self: Cell) bool {
-        return self.style_id != style.default_id;
+        return self.style_id != stylepkg.default_id;
     }
 
     /// Returns true if the cell has no text or styling.

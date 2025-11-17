@@ -76,7 +76,6 @@ extension Ghostty {
                         .focusedValue(\.ghosttySurfaceView, surfaceView)
                         .focusedValue(\.ghosttySurfaceCellSize, surfaceView.cellSize)
                     #if canImport(AppKit)
-                        .backport.pointerStyle(surfaceView.pointerStyle)
                         .onReceive(pubBecomeKey) { notification in
                             guard let window = notification.object as? NSWindow else { return }
                             guard let surfaceWindow = surfaceView.window else { return }
@@ -407,8 +406,8 @@ extension Ghostty {
         }
 
         func updateOSView(_ scrollView: SurfaceScrollView, context: Context) {
-            // Our scrollview always takes up the full size.
-            scrollView.frame.size = size
+            // Nothing to do: SwiftUI automatically updates the frame size, and
+            // SurfaceScrollView handles the rest in response to that
         }
         #else
         func makeOSView(context: Context) -> SurfaceView {

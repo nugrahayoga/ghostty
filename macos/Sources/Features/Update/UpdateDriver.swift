@@ -164,15 +164,20 @@ class UpdateDriver: NSObject, SPUUserDriver {
     }
     
     func showReady(toInstallAndRelaunch reply: @escaping @Sendable (SPUUserUpdateChoice) -> Void) {
-        viewModel.state = .readyToInstall(.init(reply: reply))
-        
         if !hasUnobtrusiveTarget {
             standard.showReady(toInstallAndRelaunch: reply)
+        } else {
+            reply(.install)
         }
     }
     
     func showInstallingUpdate(withApplicationTerminated applicationTerminated: Bool, retryTerminatingApplication: @escaping () -> Void) {
-        viewModel.state = .installing(.init(retryTerminatingApplication: retryTerminatingApplication))
+        viewModel.state = .installing(.init(
+            retryTerminatingApplication: retryTerminatingApplication,
+            dismiss: { [weak viewModel] in
+                viewModel?.state = .idle
+            }
+        ))
         
         if !hasUnobtrusiveTarget {
             standard.showInstallingUpdate(withApplicationTerminated: applicationTerminated, retryTerminatingApplication: retryTerminatingApplication)
@@ -200,7 +205,7 @@ class UpdateDriver: NSObject, SPUUserDriver {
     /// True if there is a target that can render our unobtrusive update checker.
     var hasUnobtrusiveTarget: Bool {
         NSApp.windows.contains { window in
-            window is TerminalWindow &&
+            (window is TerminalWindow || window is QuickTerminalWindow) &&
             window.isVisible
         }
     }

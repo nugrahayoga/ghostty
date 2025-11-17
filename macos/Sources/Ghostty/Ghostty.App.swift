@@ -61,7 +61,8 @@ extension Ghostty {
                 action_cb: { app, target, action in App.action(app!, target: target, action: action) },
                 read_clipboard_cb: { userdata, loc, state in App.readClipboard(userdata, location: loc, state: state) },
                 confirm_read_clipboard_cb: { userdata, str, state, request in App.confirmReadClipboard(userdata, string: str, state: state, request: request ) },
-                write_clipboard_cb: { userdata, str, loc, confirm in App.writeClipboard(userdata, string: str, location: loc, confirm: confirm) },
+                write_clipboard_cb: { userdata, loc, content, len, confirm in
+                    App.writeClipboard(userdata, location: loc, content: content, len: len, confirm: confirm) },
                 close_surface_cb: { userdata, processAlive in App.closeSurface(userdata, processAlive: processAlive) }
             )
 
@@ -149,10 +150,7 @@ extension Ghostty {
             }
 
             ghostty_app_update_config(app, newConfig.config!)
-
-            // We can only set our config after updating it so that we don't free
-            // memory that may still be in use
-            self.config = newConfig
+            /// applied config will be updated in ``Self.configChange(_:target:v:)``
         }
 
         func reloadConfig(surface: ghostty_surface_t, soft: Bool = false) {
@@ -279,8 +277,9 @@ extension Ghostty {
 
         static func writeClipboard(
             _ userdata: UnsafeMutableRawPointer?,
-            string: UnsafePointer<CChar>?,
             location: ghostty_clipboard_e,
+            content: UnsafePointer<ghostty_clipboard_content_s>?,
+            len: Int,
             confirm: Bool
         ) {}
 
@@ -367,23 +366,53 @@ extension Ghostty {
             }
         }
 
-        static func writeClipboard(_ userdata: UnsafeMutableRawPointer?, string: UnsafePointer<CChar>?, location: ghostty_clipboard_e, confirm: Bool) {
+        static func writeClipboard(
+            _ userdata: UnsafeMutableRawPointer?,
+            location: ghostty_clipboard_e,
+            content: UnsafePointer<ghostty_clipboard_content_s>?,
+            len: Int,
+            confirm: Bool
+        ) {
             let surface = self.surfaceUserdata(from: userdata)
-
-
             guard let pasteboard = NSPasteboard.ghostty(location) else { return }
-            guard let valueStr = String(cString: string!, encoding: .utf8) else { return }
+            guard let content = content, len > 0 else { return }
+            
+            // Convert the C array to Swift array
+            let contentArray = (0..<len).compactMap { i in
+                Ghostty.ClipboardContent.from(content: content[i])
+            }
+            guard !contentArray.isEmpty else { return }
+            
+            // Assert there is only one text/plain entry. For security reasons we need
+            // to guarantee this for now since our confirmation dialog only shows one.
+            assert(contentArray.filter({ $0.mime == "text/plain" }).count <= 1,
+                   "clipboard contents should have at most one text/plain entry")
+            
             if !confirm {
-                pasteboard.declareTypes([.string], owner: nil)
-                pasteboard.setString(valueStr, forType: .string)
+                // Declare all types
+                let types = contentArray.compactMap { item in
+                    NSPasteboard.PasteboardType(mimeType: item.mime)
+                }
+                pasteboard.declareTypes(types, owner: nil)
+                
+                // Set data for each type
+                for item in contentArray {
+                    guard let type = NSPasteboard.PasteboardType(mimeType: item.mime) else { continue }
+                    pasteboard.setString(item.data, forType: type)
+                }
                 return
             }
 
+            // For confirmation, use the text/plain content if it exists
+            guard let textPlainContent = contentArray.first(where: { $0.mime == "text/plain" }) else {
+                return
+            }
+            
             NotificationCenter.default.post(
                 name: Notification.confirmClipboard,
                 object: surface,
                 userInfo: [
-                    Notification.ConfirmClipboardStrKey: valueStr,
+                    Notification.ConfirmClipboardStrKey: textPlainContent.data,
                     Notification.ConfirmClipboardRequestKey: Ghostty.ClipboardRequest.osc_52_write(pasteboard),
                 ]
             )
@@ -575,7 +604,8 @@ extension Ghostty {
                 scrollbar(app, target: target, v: action.action.scrollbar)
 
             case GHOSTTY_ACTION_CLOSE_ALL_WINDOWS:
-                fallthrough
+                closeAllWindows(app, target: target)
+
             case GHOSTTY_ACTION_TOGGLE_TAB_OVERVIEW:
                 fallthrough
             case GHOSTTY_ACTION_TOGGLE_WINDOW_DECORATIONS:
@@ -646,6 +676,10 @@ extension Ghostty {
                     NSWorkspace.shared.open([url], withApplicationAt: textEditor, configuration: NSWorkspace.OpenConfiguration())
                     return true
                 }
+                
+            case .html:
+                // The extension will be HTML and we do the right thing automatically.
+                break
                 
             case .unknown:
                 break
@@ -845,6 +879,11 @@ extension Ghostty {
             }
         }
 
+        private static func closeAllWindows(_ app: ghostty_app_t, target: ghostty_target_s) {
+            guard let appDelegate = NSApplication.shared.delegate as? AppDelegate else { return }
+            appDelegate.closeAllWindows(nil)
+        }
+
         private static func toggleFullscreen(
             _ app: ghostty_app_t,
             target: ghostty_target_s,
@@ -1029,26 +1068,38 @@ extension Ghostty {
                     guard let surfaceView = self.surfaceView(from: surface) else { return false }
                     guard let controller = surfaceView.window?.windowController as? BaseTerminalController else { return false }
 
-                    // For now, we return false if the window has no splits and we return
-                    // true if the window has ANY splits. This isn't strictly correct because
-                    // we should only be returning true if we actually performed the action,
-                    // but this handles the most common case of caring about goto_split performability
-                    // which is the no-split case.
+                    // If the window has no splits, the action is not performable
                     guard controller.surfaceTree.isSplit else { return false }
 
+                    // Convert the C API direction to our Swift type
+                    guard let splitDirection = SplitFocusDirection.from(direction: direction) else { return false }
+
+                    // Find the current node in the tree
+                    guard let targetNode = controller.surfaceTree.root?.node(view: surfaceView) else { return false }
+
+                    // Check if a split actually exists in the target direction before
+                    // returning true. This ensures performable keybinds only consume
+                    // the key event when we actually perform navigation.
+                    let focusDirection: SplitTree<Ghostty.SurfaceView>.FocusDirection = splitDirection.toSplitTreeFocusDirection()
+                    guard controller.surfaceTree.focusTarget(for: focusDirection, from: targetNode) != nil else {
+                        return false
+                    }
+
+                    // We have a valid target, post the notification to perform the navigation
                     NotificationCenter.default.post(
                         name: Notification.ghosttyFocusSplit,
                         object: surfaceView,
                         userInfo: [
-                            Notification.SplitDirectionKey: SplitFocusDirection.from(direction: direction) as Any,
+                            Notification.SplitDirectionKey: splitDirection as Any,
                         ]
                     )
 
+                    return true
+
                 default:
                     assertionFailure()
+                    return false
                 }
-
-                return true
         }
 
         private static func resizeSplit(

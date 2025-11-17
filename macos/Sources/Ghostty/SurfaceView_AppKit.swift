@@ -73,7 +73,7 @@ extension Ghostty {
         @Published var surfaceSize: ghostty_surface_size_s? = nil
 
         // Whether the pointer should be visible or not
-        @Published private(set) var pointerStyle: BackportPointerStyle = .default
+        @Published private(set) var pointerStyle: CursorStyle = .horizontalText
 
         /// The configuration derived from the Ghostty config so we don't need to rely on references.
         @Published private(set) var derivedConfig: DerivedConfig
@@ -88,6 +88,14 @@ extension Ghostty {
         // An initial size to request for a window. This will only affect
         // then the view is moved to a new window.
         var initialSize: NSSize? = nil
+
+        // A content size received through sizeDidChange that may in some cases
+        // be different from the frame size.
+        private var contentSizeBacking: NSSize?
+        private var contentSize: NSSize {
+            get { return contentSizeBacking ?? frame.size }
+            set { contentSizeBacking = newValue }
+        }
 
         // Set whether the surface is currently on a password input or not. This is
         // detected with the set_password_input_cb on the Ghostty state.
@@ -144,6 +152,9 @@ extension Ghostty {
         var surface: ghostty_surface_t? {
             surfaceModel?.unsafeCValue
         }
+        /// Current scrollbar state, cached here for persistence across rebuilds
+        /// of the SwiftUI view hierarchy, for example when changing splits
+        var scrollbar: Ghostty.Action.Scrollbar?
 
         // Notification identifiers associated with this surface
         var notificationIdentifiers: Set<String> = []
@@ -410,6 +421,8 @@ extension Ghostty {
             // The size represents our final size we're going for.
             let scaledSize = self.convertToBacking(size)
             setSurfaceSize(width: UInt32(scaledSize.width), height: UInt32(scaledSize.height))
+            // Store this size so we can reuse it when backing properties change
+            contentSize = size
         }
 
         private func setSurfaceSize(width: UInt32, height: UInt32) {
@@ -464,16 +477,16 @@ extension Ghostty {
                 pointerStyle = .resizeLeftRight
 
             case GHOSTTY_MOUSE_SHAPE_VERTICAL_TEXT:
-                pointerStyle = .default
+                pointerStyle = .verticalText
 
-            // These are not yet supported. We should support them by constructing a
-            // PointerStyle from an NSCursor.
             case GHOSTTY_MOUSE_SHAPE_CONTEXT_MENU:
-                fallthrough
+                pointerStyle = .contextMenu
+
             case GHOSTTY_MOUSE_SHAPE_CROSSHAIR:
-                fallthrough
+                pointerStyle = .crosshair
+
             case GHOSTTY_MOUSE_SHAPE_NOT_ALLOWED:
-                pointerStyle = .default
+                pointerStyle = .operationNotAllowed
 
             default:
                 // We ignore unknown shapes.
@@ -764,7 +777,8 @@ extension Ghostty {
             ghostty_surface_set_content_scale(surface, xScale, yScale)
 
             // When our scale factor changes, so does our fb size so we send that too
-            setSurfaceSize(width: UInt32(fbFrame.size.width), height: UInt32(fbFrame.size.height))
+            let scaledSize = self.convertToBacking(contentSize)
+            setSurfaceSize(width: UInt32(scaledSize.width), height: UInt32(scaledSize.height))
         }
 
         override func mouseDown(with event: NSEvent) {
@@ -889,6 +903,7 @@ extension Ghostty {
             // Handle focus-follows-mouse
             if let window,
                let controller = window.windowController as? BaseTerminalController,
+               !controller.commandPaletteIsShowing,
                (window.isKeyWindow &&
                     !self.focused &&
                     controller.focusFollowsMouse)
@@ -1725,13 +1740,22 @@ extension Ghostty.SurfaceView: NSTextInputClient {
         } else {
             ghostty_surface_ime_point(surface, &x, &y, &width, &height)
         }
-
+        if range.length == 0, width > 0 {
+            // This fixes #8493 while speaking
+            // My guess is that positive width doesn't make sense
+            // for the dictation microphone indicator
+            width = 0
+            x += cellSize.width * Double(range.location + range.length)
+        }
         // Ghostty coordinates are in top-left (0, 0) so we have to convert to
         // bottom-left since that is what UIKit expects
+        // when there's is no characters selected,
+        // width should be 0 so that dictation indicator
+        // can start in the right place
         let viewRect = NSMakeRect(
             x,
             frame.size.height - y,
-            max(width, cellSize.width),
+            width,
             max(height, cellSize.height))
 
         // Convert the point to the window coordinates

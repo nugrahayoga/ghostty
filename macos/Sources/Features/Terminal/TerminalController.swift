@@ -377,9 +377,14 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
                 withTarget: controller,
                 expiresAfter: controller.undoExpiration
             ) { target in
-                // Close the tab when undoing
-                undoManager.disableUndoRegistration {
-                    target.closeTab(nil)
+                // Close the tab when undoing. We do this in a DispatchQueue because
+                // for some people on macOS Tahoe this caused a crash and the queue
+                // fixes it.
+                // https://github.com/ghostty-org/ghostty/pull/9512
+                DispatchQueue.main.async {
+                    undoManager.disableUndoRegistration {
+                        target.closeTab(nil)
+                    }
                 }
 
                 // Register redo action
@@ -531,7 +536,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             frame.origin.x = max(screen.frame.origin.x, min(frame.origin.x, screen.frame.maxX - newWidth))
             frame.origin.y = max(screen.frame.origin.y, min(frame.origin.y, screen.frame.maxY - newHeight))
 
-            return frame
+            return adjustForWindowPosition(frame: frame, on: screen)
         }
 
         guard let initialFrame else { return nil }
@@ -549,7 +554,30 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         frame.origin.x = max(screen.frame.origin.x, min(frame.origin.x, screen.frame.maxX - newWidth))
         frame.origin.y = max(screen.frame.origin.y, min(frame.origin.y, screen.frame.maxY - newHeight))
 
-        return frame
+        return adjustForWindowPosition(frame: frame, on: screen)
+    }
+    
+    /// Adjusts the given frame for the configured window position.
+    func adjustForWindowPosition(frame: NSRect, on screen: NSScreen) -> NSRect {
+        guard let x = derivedConfig.windowPositionX else { return frame }
+        guard let y = derivedConfig.windowPositionY else { return frame }
+
+        // Convert top-left coordinates to bottom-left origin using our utility extension
+        let origin = screen.origin(
+            fromTopLeftOffsetX: CGFloat(x),
+            offsetY: CGFloat(y),
+            windowSize: frame.size)
+        
+        // Clamp the origin to ensure the window stays fully visible on screen
+        var safeOrigin = origin
+        let vf = screen.visibleFrame
+        safeOrigin.x = min(max(safeOrigin.x, vf.minX), vf.maxX - frame.width)
+        safeOrigin.y = min(max(safeOrigin.y, vf.minY), vf.maxY - frame.height)
+        
+        // Return our new origin
+        var result = frame
+        result.origin = safeOrigin
+        return result
     }
 
     /// This is called anytime a node in the surface tree is being removed.
@@ -789,32 +817,25 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
 
     /// Close all windows, asking for confirmation if necessary.
     static func closeAllWindows() {
-        let needsConfirm: Bool = all.contains {
-            $0.surfaceTree.contains { $0.needsConfirmQuit }
-        }
-
-        if (!needsConfirm) {
+        // The window we use for confirmations. Try to find the first window that
+        // needs quit confirmation. This lets us attach the confirmation to something
+        // that is running.
+        guard let confirmWindow = all
+            .first(where: { $0.surfaceTree.contains(where: { $0.needsConfirmQuit }) })?
+            .surfaceTree.first(where: { $0.needsConfirmQuit })?
+            .window
+        else {
             closeAllWindowsImmediately()
             return
         }
 
-        // If we don't have a main window, we just close all windows because
-        // we have no window to show the modal on top of. I'm sure there's a way
-        // to do an app-level alert but I don't know how and this case should never
-        // really happen.
-        guard let alertWindow = preferredParent?.window else {
-            closeAllWindowsImmediately()
-            return
-        }
-
-        // If we need confirmation by any, show one confirmation for all windows
         let alert = NSAlert()
         alert.messageText = "Close All Windows?"
         alert.informativeText = "All terminal sessions will be terminated."
         alert.addButton(withTitle: "Close All Windows")
         alert.addButton(withTitle: "Cancel")
         alert.alertStyle = .warning
-        alert.beginSheetModal(for: alertWindow, completionHandler: { response in
+        alert.beginSheetModal(for: confirmWindow, completionHandler: { response in
             if (response == .alertFirstButtonReturn) {
                 // This is important so that we avoid losing focus when Stage
                 // Manager is used (#8336)
@@ -1134,24 +1155,19 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         // if we're closing the window. If we don't have a tabgroup for any
         // reason we check ourselves.
         let windows: [NSWindow] = window.tabGroup?.windows ?? [window]
-
-        // Check if any windows require close confirmation.
-        let needsConfirm = windows.contains { tabWindow in
-            guard let controller = tabWindow.windowController as? TerminalController else {
-                return false
-            }
-            return controller.surfaceTree.contains(where: { $0.needsConfirmQuit })
-        }
-
-        // If none need confirmation then we can just close all the windows.
-        if !needsConfirm {
+        guard let confirmController = windows
+            .compactMap({ $0.windowController as? TerminalController })
+            .first(where: { $0.surfaceTree.contains(where: { $0.needsConfirmQuit }) })
+        else {
             closeWindowImmediately()
             return
         }
 
-        confirmClose(
+        // We call confirmClose on the proper controller so the alert is
+        // attached to the window that needs confirmation.
+        confirmController.confirmClose(
             messageText: "Close Window?",
-            informativeText: "All terminal sessions in this window will be terminated."
+            informativeText: "All terminal sessions in this window will be terminated.",
         ) {
             self.closeWindowImmediately()
         }
@@ -1362,12 +1378,16 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         let macosWindowButtons: Ghostty.MacOSWindowButtons
         let macosTitlebarStyle: String
         let maximize: Bool
+        let windowPositionX: Int16?
+        let windowPositionY: Int16?
 
         init() {
             self.backgroundColor = Color(NSColor.windowBackgroundColor)
             self.macosWindowButtons = .visible
             self.macosTitlebarStyle = "system"
             self.maximize = false
+            self.windowPositionX = nil
+            self.windowPositionY = nil
         }
 
         init(_ config: Ghostty.Config) {
@@ -1375,6 +1395,8 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             self.macosWindowButtons = config.macosWindowButtons
             self.macosTitlebarStyle = config.macosTitlebarStyle
             self.maximize = config.maximize
+            self.windowPositionX = config.windowPositionX
+            self.windowPositionY = config.windowPositionY
         }
     }
 }

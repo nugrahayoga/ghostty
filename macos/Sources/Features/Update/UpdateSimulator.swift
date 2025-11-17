@@ -31,6 +31,9 @@ enum UpdateSimulator {
     /// Shows the installing state with restart button: installing (stays until dismissed)
     case installing
     
+    /// Simulates auto-update flow: goes directly to installing state without showing intermediate UI
+    case autoUpdate
+    
     func simulate(with viewModel: UpdateViewModel) {
         switch self {
         case .happyPath:
@@ -49,6 +52,8 @@ enum UpdateSimulator {
             simulateCancelDuringChecking(viewModel)
         case .installing:
             simulateInstalling(viewModel)
+        case .autoUpdate:
+            simulateAutoUpdate(viewModel)
         }
     }
     
@@ -262,18 +267,7 @@ enum UpdateSimulator {
                 
                 if j == 5 {
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                        viewModel.state = .readyToInstall(.init(
-                            reply: { choice in
-                                if choice == .install {
-                                    viewModel.state = .installing(.init(retryTerminatingApplication: {
-                                        print("Restart button clicked in simulator - resetting to idle")
-                                        viewModel.state = .idle
-                                    }))
-                                } else {
-                                    viewModel.state = .idle
-                                }
-                            }
-                        ))
+                        simulateInstalling(viewModel)
                     }
                 }
             }
@@ -281,9 +275,27 @@ enum UpdateSimulator {
     }
     
     private func simulateInstalling(_ viewModel: UpdateViewModel) {
-        viewModel.state = .installing(.init(retryTerminatingApplication: {
-            print("Restart button clicked in simulator - resetting to idle")
-            viewModel.state = .idle
-        }))
+        viewModel.state = .installing(.init(
+            retryTerminatingApplication: {
+                print("Restart button clicked in simulator - resetting to idle")
+                viewModel.state = .idle
+            },
+            dismiss: {
+                viewModel.state = .idle
+            }
+        ))
+    }
+    
+    private func simulateAutoUpdate(_ viewModel: UpdateViewModel) {
+        viewModel.state = .installing(.init(
+            isAutoUpdate: true,
+            retryTerminatingApplication: {
+                print("Restart button clicked in simulator - resetting to idle")
+                viewModel.state = .idle
+            },
+            dismiss: {
+                viewModel.state = .idle
+            }
+        ))
     }
 }

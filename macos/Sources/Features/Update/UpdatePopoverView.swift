@@ -35,10 +35,10 @@ struct UpdatePopoverView: View {
             case .extracting(let extracting):
                 ExtractingView(extracting: extracting)
                 
-            case .readyToInstall(let ready):
-                ReadyToInstallView(ready: ready, dismiss: dismiss)
-                
             case .installing(let installing):
+                // This is only required when `installing.isAutoUpdate == true`,
+                // but we keep it anyway, just in case something unexpected
+                // happens during installing
                 InstallingView(installing: installing, dismiss: dismiss)
                 
             case .notFound(let notFound):
@@ -181,7 +181,7 @@ fileprivate struct UpdateAvailableView: View {
                     
                     Spacer()
                     
-                    Button("Install") {
+                    Button("Install and Relaunch") {
                         update.reply(.install)
                         dismiss()
                     }
@@ -274,44 +274,6 @@ fileprivate struct ExtractingView: View {
     }
 }
 
-fileprivate struct ReadyToInstallView: View {
-    let ready: UpdateState.ReadyToInstall
-    let dismiss: DismissAction
-    
-    var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            VStack(alignment: .leading, spacing: 8) {
-                Text("Ready to Install")
-                    .font(.system(size: 13, weight: .semibold))
-                
-                Text("The update is ready to install.")
-                    .font(.system(size: 11))
-                    .foregroundColor(.secondary)
-            }
-            
-            HStack(spacing: 8) {
-                Button("Later") {
-                    ready.reply(.dismiss)
-                    dismiss()
-                }
-                .keyboardShortcut(.cancelAction)
-                .controlSize(.small)
-                
-                Spacer()
-                
-                Button("Install and Relaunch") {
-                    ready.reply(.install)
-                    dismiss()
-                }
-                .keyboardShortcut(.defaultAction)
-                .buttonStyle(.borderedProminent)
-                .controlSize(.small)
-            }
-        }
-        .padding(16)
-    }
-}
-
 fileprivate struct InstallingView: View {
     let installing: UpdateState.Installing
     let dismiss: DismissAction
@@ -329,7 +291,15 @@ fileprivate struct InstallingView: View {
             }
             
             HStack {
+                Button("Restart Later") {
+                    installing.dismiss()
+                    dismiss()
+                }
+                .keyboardShortcut(.cancelAction)
+                .controlSize(.small)
+                
                 Spacer()
+                
                 Button("Restart Now") {
                     installing.retryTerminatingApplication()
                     dismiss()

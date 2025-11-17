@@ -110,7 +110,7 @@ class AppDelegate: NSObject,
     }
 
     /// Tracks the windows that we hid for toggleVisibility.
-    private var hiddenState: ToggleVisibilityState? = nil
+    private(set) var hiddenState: ToggleVisibilityState? = nil
 
     /// The observer for the app appearance.
     private var appearanceObserver: NSKeyValueObservation? = nil
@@ -119,19 +119,7 @@ class AppDelegate: NSObject,
     private var signals: [DispatchSourceSignal] = []
 
     /// The custom app icon image that is currently in use.
-    @Published private(set) var appIcon: NSImage? = nil {
-        didSet {
-#if DEBUG
-            // if no custom icon specified, we use blueprint to distinguish from release app
-            NSApplication.shared.applicationIconImage = appIcon ?? NSImage(named: "BlueprintImage")
-#else
-            NSApplication.shared.applicationIconImage = appIcon
-#endif
-            let appPath = Bundle.main.bundlePath
-            NSWorkspace.shared.setIcon(appIcon, forFile: appPath, options: [])
-            NSWorkspace.shared.noteFileSystemChanged(appPath)
-        }
-    }
+    @Published private(set) var appIcon: NSImage? = nil
 
     override init() {
         super.init()
@@ -290,6 +278,11 @@ class AppDelegate: NSObject,
                 NSApp.arrangeInFront(nil)
             }
         }
+    }
+
+    func applicationDidHide(_ notification: Notification) {
+        // Keep track of our hidden state to restore properly
+        self.hiddenState = .init()
     }
 
     func applicationDidBecomeActive(_ notification: Notification) {
@@ -724,6 +717,10 @@ class AppDelegate: NSObject,
     }
 
     @objc private func ghosttyBellDidRing(_ notification: Notification) {
+        if (ghostty.config.bellFeatures.contains(.system)) {
+            NSSound.beep()
+        }
+
         if (ghostty.config.bellFeatures.contains(.attention)) {
             // Bounce the dock icon if we're not focused.
             NSApp.requestUserAttention(.informationalRequest)
@@ -823,6 +820,14 @@ class AppDelegate: NSObject,
                 autoUpdate == .check || autoUpdate == .download
             updateController.updater.automaticallyDownloadsUpdates =
                 autoUpdate == .download
+            /**
+             To test `auto-update` easily, uncomment the line below and
+             delete `SUEnableAutomaticChecks` in Ghostty-Info.plist.
+
+             Note: When `auto-update = download`, you may need to
+             `Clean Build Folder` if a background install has already begun.
+             */
+            //updateController.updater.checkForUpdatesInBackground()
         }
 
         // Config could change keybindings, so update everything that depends on that
@@ -870,48 +875,53 @@ class AppDelegate: NSObject,
         } else {
             GlobalEventTap.shared.disable()
         }
+        Task {
+            await updateAppIcon(from: config)
+        }
     }
 
     /// Sync the appearance of our app with the theme specified in the config.
     private func syncAppearance(config: Ghostty.Config) {
         NSApplication.shared.appearance = .init(ghosttyConfig: config)
-        
+    }
+
+    @concurrent
+    private func updateAppIcon(from config: Ghostty.Config) async  {
+        var appIcon: NSImage?
+
         switch (config.macosIcon) {
         case .official:
-            self.appIcon = nil
             break
-
         case .blueprint:
-            self.appIcon = NSImage(named: "BlueprintImage")!
+            appIcon = NSImage(named: "BlueprintImage")!
 
         case .chalkboard:
-            self.appIcon = NSImage(named: "ChalkboardImage")!
+            appIcon = NSImage(named: "ChalkboardImage")!
 
         case .glass:
-            self.appIcon = NSImage(named: "GlassImage")!
+            appIcon = NSImage(named: "GlassImage")!
 
         case .holographic:
-            self.appIcon = NSImage(named: "HolographicImage")!
+            appIcon = NSImage(named: "HolographicImage")!
 
         case .microchip:
-            self.appIcon = NSImage(named: "MicrochipImage")!
+            appIcon = NSImage(named: "MicrochipImage")!
 
         case .paper:
-            self.appIcon = NSImage(named: "PaperImage")!
+            appIcon = NSImage(named: "PaperImage")!
 
         case .retro:
-            self.appIcon = NSImage(named: "RetroImage")!
+            appIcon = NSImage(named: "RetroImage")!
 
         case .xray:
-            self.appIcon = NSImage(named: "XrayImage")!
+            appIcon = NSImage(named: "XrayImage")!
 
         case .custom:
             if let userIcon = NSImage(contentsOfFile: config.macosCustomIcon) {
-                self.appIcon = userIcon
+                appIcon = userIcon
             } else {
-                self.appIcon = nil // Revert back to official icon if invalid location
+                appIcon = nil // Revert back to official icon if invalid location
             }
-
         case .customStyle:
             guard let ghostColor = config.macosIconGhostColor else { break }
             guard let screenColors = config.macosIconScreenColor else { break }
@@ -920,7 +930,26 @@ class AppDelegate: NSObject,
                 ghostColor: ghostColor,
                 frame: config.macosIconFrame
             ).makeImage() else { break }
-            self.appIcon = icon
+            appIcon = icon
+        }
+        // make it immutable, so Swift 6 won't complain
+        let newIcon = appIcon
+
+        let appPath = Bundle.main.bundlePath
+        NSWorkspace.shared.setIcon(newIcon, forFile: appPath, options: [])
+        NSWorkspace.shared.noteFileSystemChanged(appPath)
+
+        await MainActor.run {
+            self.appIcon = newIcon
+#if DEBUG
+            // if no custom icon specified, we use blueprint to distinguish from release app
+            NSApplication.shared.applicationIconImage = newIcon ?? NSImage(named: "BlueprintImage")
+            // Changing the app bundle's icon will corrupt code signing.
+            // We only use the default blueprint icon for the dock,
+            // so developers don't need to clean and re-build every time.
+#else
+            NSApplication.shared.applicationIconImage = newIcon
+#endif
         }
     }
 
@@ -1060,8 +1089,6 @@ class AppDelegate: NSObject,
             guard let keyWindow = NSApp.keyWindow,
                   !keyWindow.styleMask.contains(.fullScreen) else { return }
 
-            // Keep track of our hidden state to restore properly
-            self.hiddenState = .init()
             NSApp.hide(nil)
             return
         }
@@ -1110,11 +1137,11 @@ class AppDelegate: NSObject,
         }
     }
 
-    private struct ToggleVisibilityState {
+    struct ToggleVisibilityState {
         let hiddenWindows: [Weak<NSWindow>]
         let keyWindow: Weak<NSWindow>?
 
-        init() {
+        fileprivate init() {
             // We need to know the key window so that we can bring focus back to the
             // right window if it was hidden.
             self.keyWindow = if let keyWindow = NSApp.keyWindow {

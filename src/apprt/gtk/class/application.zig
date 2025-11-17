@@ -709,6 +709,8 @@ pub const Application = extern struct {
 
             .ring_bell => Action.ringBell(target),
 
+            .scrollbar => Action.scrollbar(target, value),
+
             .set_title => Action.setTitle(target, value),
 
             .show_child_exited => return Action.showChildExited(target, value),
@@ -728,7 +730,6 @@ pub const Application = extern struct {
             .command_finished => return Action.commandFinished(target, value),
 
             // Unimplemented
-            .scrollbar,
             .secure_input,
             .close_all_windows,
             .float_window,
@@ -1110,7 +1111,7 @@ pub const Application = extern struct {
         self.syncActionAccelerator("win.split-down", .{ .new_split = .down });
         self.syncActionAccelerator("win.split-left", .{ .new_split = .left });
         self.syncActionAccelerator("win.split-up", .{ .new_split = .up });
-        self.syncActionAccelerator("win.copy", .{ .copy_to_clipboard = {} });
+        self.syncActionAccelerator("win.copy", .{ .copy_to_clipboard = .mixed });
         self.syncActionAccelerator("win.paste", .{ .paste_from_clipboard = {} });
         self.syncActionAccelerator("win.reset", .{ .reset = {} });
         self.syncActionAccelerator("win.clear", .{ .clear_screen = {} });
@@ -2325,6 +2326,16 @@ const Action = struct {
         switch (target) {
             .app => {},
             .surface => |v| v.rt_surface.surface.setBellRinging(true),
+        }
+    }
+
+    pub fn scrollbar(
+        target: apprt.Target,
+        value: apprt.Action.Value(.scrollbar),
+    ) void {
+        switch (target) {
+            .app => {},
+            .surface => |v| v.rt_surface.surface.setScrollbar(value),
         }
     }
 

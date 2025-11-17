@@ -38,6 +38,7 @@ const RepeatableReadableIO = @import("io.zig").RepeatableReadableIO;
 const RepeatableStringMap = @import("RepeatableStringMap.zig");
 pub const Path = @import("path.zig").Path;
 pub const RepeatablePath = @import("path.zig").RepeatablePath;
+const ClipboardCodepointMap = @import("ClipboardCodepointMap.zig");
 
 // We do this instead of importing all of terminal/main.zig to
 // limit the dependency graph. This is important because some things
@@ -279,6 +280,30 @@ pub const compatibility = std.StaticStringMap(
 /// i.e. new windows, tabs, etc.
 @"font-codepoint-map": RepeatableCodepointMap = .{},
 
+/// Map specific Unicode codepoints to replacement values when copying text
+/// to clipboard.
+///
+/// This configuration allows you to replace specific Unicode characters with
+/// other characters or strings when copying terminal content to the clipboard.
+/// This is useful for converting special terminal symbols to more compatible
+/// characters for pasting into other applications.
+///
+/// The syntax is similar to `font-codepoint-map`:
+/// - Single codepoint: `U+1234=U+ABCD` or `U+1234=replacement_text`
+/// - Codepoint range: `U+1234-U+5678=U+ABCD`
+///
+/// Examples:
+/// - `clipboard-codepoint-map = U+2500=U+002D` (box drawing horizontal → hyphen)
+/// - `clipboard-codepoint-map = U+2502=U+007C` (box drawing vertical → pipe)
+/// - `clipboard-codepoint-map = U+03A3=SUM` (Greek sigma → "SUM")
+///
+/// This configuration can be repeated multiple times to specify multiple
+/// mappings. Later entries take priority over earlier ones for overlapping
+/// ranges.
+///
+/// Note: This only applies to text copying operations, not URL copying.
+@"clipboard-codepoint-map": RepeatableClipboardCodepointMap = .{},
+
 /// Draw fonts with a thicker stroke, if supported.
 /// This is currently only supported on macOS.
 @"font-thicken": bool = false,
@@ -475,6 +500,11 @@ pub const compatibility = std.StaticStringMap(
 ///     you're using a pixel font. Disabled by default.
 ///
 ///   * `autohint` - Enable the freetype auto-hinter. Enabled by default.
+///
+///   * `light` - Use a light hinting style, better preserving glyph shapes.
+///     This is the most common setting in GTK apps and therefore also Ghostty's
+///     default. This has no effect if `monochrome` is enabled. Enabled by
+///     default.
 ///
 /// Example: `hinting`, `no-hinting`, `force-autohint`, `no-force-autohint`
 @"freetype-load-flags": FreetypeLoadFlags = .{},
@@ -694,7 +724,8 @@ foreground: Color = .{ .r = 0xFF, .g = 0xFF, .b = 0xFF },
 /// Color palette for the 256 color form that many terminal applications use.
 /// The syntax of this configuration is `N=COLOR` where `N` is 0 to 255 (for
 /// the 256 colors in the terminal color table) and `COLOR` is a typical RGB
-/// color code such as `#AABBCC` or `AABBCC`, or a named X11 color.
+/// color code such as `#AABBCC` or `AABBCC`, or a named X11 color. For example,
+/// `palette = 5=#BB78D9` will set the 'purple' color.
 ///
 /// The palette index can be in decimal, binary, octal, or hexadecimal.
 /// Decimal is assumed unless a prefix is used: `0b` for binary, `0o` for octal,
@@ -833,6 +864,18 @@ palette: Palette = .{},
 ///   * `always`
 ///   * `never`
 @"mouse-shift-capture": MouseShiftCapture = .false,
+
+/// Enable or disable mouse reporting. When set to `false`, mouse events will
+/// not be reported to terminal applications even if they request it. This
+/// allows you to always use the mouse for selection and other terminal UI
+/// interactions without applications capturing mouse input.
+///
+/// When set to `true` (the default), terminal applications can request mouse
+/// reporting and will receive mouse events according to their requested mode.
+///
+/// This can be toggled at runtime using the `toggle_mouse_reporting` keybind
+/// action.
+@"mouse-reporting": bool = true,
 
 /// Multiplier for scrolling distance with the mouse wheel.
 ///
@@ -1748,7 +1791,7 @@ keybind: Keybinds = .{},
 ///   * `ghostty` - Use the background and foreground colors specified in the
 ///     Ghostty configuration. This is only supported on Linux builds.
 ///
-/// On macOS, if `macos-titlebar-style` is "tabs", the window theme will be
+/// On macOS, if `macos-titlebar-style` is `tabs` or `transparent`, the window theme will be
 /// automatically set based on the luminosity of the terminal background color.
 /// This only applies to terminal windows. This setting will still apply to
 /// non-terminal windows within Ghostty.
@@ -1989,7 +2032,9 @@ keybind: Keybinds = .{},
 @"clipboard-write": ClipboardAccess = .allow,
 
 /// Trims trailing whitespace on data that is copied to the clipboard. This does
-/// not affect data sent to the clipboard via `clipboard-write`.
+/// not affect data sent to the clipboard via `clipboard-write`. This only
+/// applies to trailing whitespace on lines that have other characters.
+/// Completely blank lines always have their whitespace trimmed.
 @"clipboard-trim-trailing-spaces": bool = true,
 
 /// Require confirmation before pasting text that appears unsafe. This helps
@@ -2629,7 +2674,9 @@ keybind: Keybinds = .{},
 ///    This could result in an audiovisual effect, a notification, or something
 ///    else entirely. Changing these effects require altering system settings:
 ///    for instance under the "Sound > Alert Sound" setting in GNOME,
-///    or the "Accessibility > System Bell" settings in KDE Plasma. (GTK only)
+///    or the "Accessibility > System Bell" settings in KDE Plasma.
+///
+///    On macOS, this plays the system alert sound.
 ///
 ///  * `audio`
 ///
@@ -3429,13 +3476,76 @@ pub fn loadFile(self: *Config, alloc: Allocator, path: []const u8) !void {
     };
     defer file.close();
 
+    try self.loadFsFile(alloc, &file, path);
+}
+
+/// Load config from the given File.
+fn loadFsFile(self: *Config, alloc: Allocator, file: *std.fs.File, path: []const u8) !void {
     std.log.info("reading configuration file path={s}", .{path});
     var buf: [2048]u8 = undefined;
     var file_reader = file.reader(&buf);
     const reader = &file_reader.interface;
+    try self.loadReader(alloc, reader, path);
+}
+
+/// Load config from the given Reader.
+fn loadReader(self: *Config, alloc: Allocator, reader: *std.Io.Reader, path: []const u8) !void {
+    bom: {
+        // If the file starts with a UTF-8 byte order mark, skip it.
+        // https://en.wikipedia.org/wiki/Byte_order_mark#UTF-8
+        const bom: []const u8 = &.{ 0xef, 0xbb, 0xbf };
+        const str = reader.peek(bom.len) catch break :bom;
+        if (std.mem.eql(u8, str, bom)) {
+            log.info("skipping UTF-8 byte order mark", .{});
+            reader.toss(bom.len);
+        }
+    }
     var iter: cli.args.LineIterator = .{ .r = reader, .filepath = path };
     try self.loadIter(alloc, &iter);
     try self.expandPaths(std.fs.path.dirname(path).?);
+}
+
+test "handle bom in config files" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    {
+        const data = "\xef\xbb\xbfabnormal-command-exit-runtime = 2500\n";
+        var reader: std.Io.Reader = .fixed(data);
+        var cfg = try Config.default(alloc);
+        defer cfg.deinit();
+        try cfg.loadReader(
+            alloc,
+            &reader,
+            "/home/ghostty/.config/ghostty/config.ghostty",
+        );
+        try cfg.finalize();
+
+        try testing.expect(cfg._diagnostics.empty());
+        try testing.expectEqual(
+            2500,
+            cfg.@"abnormal-command-exit-runtime",
+        );
+    }
+
+    {
+        const data = "abnormal-command-exit-runtime = 2500\n";
+        var reader: std.Io.Reader = .fixed(data);
+        var cfg = try Config.default(alloc);
+        defer cfg.deinit();
+        try cfg.loadReader(
+            alloc,
+            &reader,
+            "/home/ghostty/.config/ghostty/config.ghostty",
+        );
+        try cfg.finalize();
+
+        try testing.expect(cfg._diagnostics.empty());
+        try testing.expectEqual(
+            2500,
+            cfg.@"abnormal-command-exit-runtime",
+        );
+    }
 }
 
 pub const OptionalFileAction = enum { loaded, not_found, @"error" };
@@ -3742,13 +3852,7 @@ pub fn loadRecursiveFiles(self: *Config, alloc_gpa: Allocator) !void {
             },
         }
 
-        log.info("loading config-file path={s}", .{path});
-        var buf: [2048]u8 = undefined;
-        var file_reader = file.reader(&buf);
-        const reader = &file_reader.interface;
-        var iter: cli.args.LineIterator = .{ .r = reader, .filepath = path };
-        try self.loadIter(alloc_gpa, &iter);
-        try self.expandPaths(std.fs.path.dirname(path).?);
+        try self.loadFsFile(arena_alloc, &file, path);
     }
 
     // If we have a suffix, add that back.
@@ -4939,6 +5043,13 @@ pub const TerminalColor = union(enum) {
         return .{ .color = try Color.parseCLI(input) };
     }
 
+    pub fn toTerminalRGB(self: TerminalColor) ?terminal.color.RGB {
+        return switch (self) {
+            .color => |v| v.toTerminalRGB(),
+            .@"cell-foreground", .@"cell-background" => null,
+        };
+    }
+
     /// Used by Formatter
     pub fn formatEntry(self: TerminalColor, formatter: formatterpkg.EntryFormatter) !void {
         switch (self) {
@@ -5623,12 +5734,12 @@ pub const Keybinds = struct {
             try self.set.put(
                 alloc,
                 .{ .key = .{ .physical = .copy } },
-                .{ .copy_to_clipboard = {} },
+                .{ .copy_to_clipboard = .mixed },
             );
             try self.set.put(
                 alloc,
                 .{ .key = .{ .physical = .paste } },
-                .{ .paste_from_clipboard = {} },
+                .paste_from_clipboard,
             );
 
             // On non-MacOS desktop envs (Windows, KDE, Gnome, Xfce), ctrl+insert is an
@@ -5641,7 +5752,7 @@ pub const Keybinds = struct {
                 try self.set.put(
                     alloc,
                     .{ .key = .{ .physical = .insert }, .mods = .{ .ctrl = true } },
-                    .{ .copy_to_clipboard = {} },
+                    .{ .copy_to_clipboard = .mixed },
                 );
                 try self.set.put(
                     alloc,
@@ -5660,7 +5771,7 @@ pub const Keybinds = struct {
             try self.set.putFlags(
                 alloc,
                 .{ .key = .{ .unicode = 'c' }, .mods = mods },
-                .{ .copy_to_clipboard = {} },
+                .{ .copy_to_clipboard = .mixed },
                 .{ .performable = true },
             );
             try self.set.put(
@@ -6782,6 +6893,193 @@ pub const RepeatableCodepointMap = struct {
     }
 };
 
+/// See "clipboard-codepoint-map" for documentation.
+pub const RepeatableClipboardCodepointMap = struct {
+    const Self = @This();
+
+    map: ClipboardCodepointMap = .{},
+
+    pub fn parseCLI(self: *Self, alloc: Allocator, input_: ?[]const u8) !void {
+        const input = input_ orelse return error.ValueRequired;
+        const eql_idx = std.mem.indexOf(u8, input, "=") orelse return error.InvalidValue;
+        const whitespace = " \t";
+        const key = std.mem.trim(u8, input[0..eql_idx], whitespace);
+        const value = std.mem.trim(u8, input[eql_idx + 1 ..], whitespace);
+
+        // Parse the replacement value - either a codepoint or string
+        const replacement: ClipboardCodepointMap.Replacement = if (std.mem.startsWith(u8, value, "U+")) blk: {
+            // Parse as codepoint
+            const cp_str = value[2..]; // Skip "U+"
+            const cp = std.fmt.parseInt(u21, cp_str, 16) catch return error.InvalidValue;
+            break :blk .{ .codepoint = cp };
+        } else blk: {
+            // Parse as UTF-8 string - validate it's valid UTF-8
+            if (!std.unicode.utf8ValidateSlice(value)) return error.InvalidValue;
+            const value_copy = try alloc.dupe(u8, value);
+            break :blk .{ .string = value_copy };
+        };
+
+        var p: UnicodeRangeParser = .{ .input = key };
+        while (try p.next()) |range| {
+            try self.map.add(alloc, .{
+                .range = range,
+                .replacement = replacement,
+            });
+        }
+    }
+
+    /// Deep copy of the struct. Required by Config.
+    pub fn clone(self: *const Self, alloc: Allocator) Allocator.Error!Self {
+        return .{ .map = try self.map.clone(alloc) };
+    }
+
+    /// Compare if two of our value are equal. Required by Config.
+    pub fn equal(self: Self, other: Self) bool {
+        const itemsA = self.map.list.slice();
+        const itemsB = other.map.list.slice();
+        if (itemsA.len != itemsB.len) return false;
+        for (0..itemsA.len) |i| {
+            const a = itemsA.get(i);
+            const b = itemsB.get(i);
+            if (!std.meta.eql(a.range, b.range)) return false;
+            switch (a.replacement) {
+                .codepoint => |cp_a| switch (b.replacement) {
+                    .codepoint => |cp_b| if (cp_a != cp_b) return false,
+                    .string => return false,
+                },
+                .string => |str_a| switch (b.replacement) {
+                    .string => |str_b| if (!std.mem.eql(u8, str_a, str_b)) return false,
+                    .codepoint => return false,
+                },
+            }
+        }
+        return true;
+    }
+
+    /// Used by Formatter
+    pub fn formatEntry(
+        self: Self,
+        formatter: anytype,
+    ) !void {
+        if (self.map.list.len == 0) {
+            try formatter.formatEntry(void, {});
+            return;
+        }
+
+        var buf: [1024]u8 = undefined;
+        var value_buf: [32]u8 = undefined;
+        const ranges = self.map.list.items(.range);
+        const replacements = self.map.list.items(.replacement);
+        for (ranges, replacements) |range, replacement| {
+            const value_str = switch (replacement) {
+                .codepoint => |cp| try std.fmt.bufPrint(&value_buf, "U+{X:0>4}", .{cp}),
+                .string => |s| s,
+            };
+
+            if (range[0] == range[1]) {
+                try formatter.formatEntry(
+                    []const u8,
+                    std.fmt.bufPrint(
+                        &buf,
+                        "U+{X:0>4}={s}",
+                        .{ range[0], value_str },
+                    ) catch return error.OutOfMemory,
+                );
+            } else {
+                try formatter.formatEntry(
+                    []const u8,
+                    std.fmt.bufPrint(
+                        &buf,
+                        "U+{X:0>4}-U+{X:0>4}={s}",
+                        .{ range[0], range[1], value_str },
+                    ) catch return error.OutOfMemory,
+                );
+            }
+        }
+    }
+
+    /// Reuse the same UnicodeRangeParser from RepeatableCodepointMap
+    const UnicodeRangeParser = RepeatableCodepointMap.UnicodeRangeParser;
+
+    test "parseCLI codepoint replacement" {
+        const testing = std.testing;
+        var arena = ArenaAllocator.init(testing.allocator);
+        defer arena.deinit();
+        const alloc = arena.allocator();
+
+        var list: Self = .{};
+        try list.parseCLI(alloc, "U+2500=U+002D"); // box drawing → hyphen
+
+        try testing.expectEqual(@as(usize, 1), list.map.list.len);
+        const entry = list.map.list.get(0);
+        try testing.expectEqual([2]u21{ 0x2500, 0x2500 }, entry.range);
+        try testing.expect(entry.replacement == .codepoint);
+        try testing.expectEqual(@as(u21, 0x002D), entry.replacement.codepoint);
+    }
+
+    test "parseCLI string replacement" {
+        const testing = std.testing;
+        var arena = ArenaAllocator.init(testing.allocator);
+        defer arena.deinit();
+        const alloc = arena.allocator();
+
+        var list: Self = .{};
+        try list.parseCLI(alloc, "U+03A3=SUM"); // Greek sigma → "SUM"
+
+        try testing.expectEqual(@as(usize, 1), list.map.list.len);
+        const entry = list.map.list.get(0);
+        try testing.expectEqual([2]u21{ 0x03A3, 0x03A3 }, entry.range);
+        try testing.expect(entry.replacement == .string);
+        try testing.expectEqualStrings("SUM", entry.replacement.string);
+    }
+
+    test "parseCLI range replacement" {
+        const testing = std.testing;
+        var arena = ArenaAllocator.init(testing.allocator);
+        defer arena.deinit();
+        const alloc = arena.allocator();
+
+        var list: Self = .{};
+        try list.parseCLI(alloc, "U+2500-U+2503=|"); // box drawing range → pipe
+
+        try testing.expectEqual(@as(usize, 1), list.map.list.len);
+        const entry = list.map.list.get(0);
+        try testing.expectEqual([2]u21{ 0x2500, 0x2503 }, entry.range);
+        try testing.expect(entry.replacement == .string);
+        try testing.expectEqualStrings("|", entry.replacement.string);
+    }
+
+    test "formatConfig codepoint" {
+        const testing = std.testing;
+        var buf: std.Io.Writer.Allocating = .init(testing.allocator);
+        defer buf.deinit();
+
+        var arena = ArenaAllocator.init(testing.allocator);
+        defer arena.deinit();
+        const alloc = arena.allocator();
+
+        var list: Self = .{};
+        try list.parseCLI(alloc, "U+2500=U+002D");
+        try list.formatEntry(formatterpkg.entryFormatter("a", &buf.writer));
+        try std.testing.expectEqualSlices(u8, "a = U+2500=U+002D\n", buf.written());
+    }
+
+    test "formatConfig string" {
+        const testing = std.testing;
+        var buf: std.Io.Writer.Allocating = .init(testing.allocator);
+        defer buf.deinit();
+
+        var arena = ArenaAllocator.init(testing.allocator);
+        defer arena.deinit();
+        const alloc = arena.allocator();
+
+        var list: Self = .{};
+        try list.parseCLI(alloc, "U+03A3=SUM");
+        try list.formatEntry(formatterpkg.entryFormatter("a", &buf.writer));
+        try std.testing.expectEqualSlices(u8, "a = U+03A3=SUM\n", buf.written());
+    }
+};
+
 pub const FontStyle = union(enum) {
     const Self = @This();
 
@@ -7886,11 +8184,15 @@ pub const BackgroundImageFit = enum {
 pub const FreetypeLoadFlags = packed struct {
     // The defaults here at the time of writing this match the defaults
     // for Freetype itself. Ghostty hasn't made any opinionated changes
-    // to these defaults.
+    // to these defaults. (Strictly speaking, `light` isn't FreeType's
+    // own default, but appears to be the effective default with most
+    // Fontconfig-aware software using FreeType, so until Ghostty
+    // implements Fontconfig support we default to `light`.)
     hinting: bool = true,
     @"force-autohint": bool = false,
     monochrome: bool = false,
     autohint: bool = true,
+    light: bool = true,
 };
 
 /// See linux-cgroup

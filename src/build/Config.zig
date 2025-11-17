@@ -55,6 +55,7 @@ emit_macos_app: bool = false,
 emit_terminfo: bool = false,
 emit_termcap: bool = false,
 emit_test_exe: bool = false,
+emit_themes: bool = false,
 emit_xcframework: bool = false,
 emit_webdata: bool = false,
 emit_unicode_table_gen: bool = false,
@@ -172,7 +173,13 @@ pub fn init(b: *std.Build, appVersion: []const u8) !Config {
         bool,
         "simd",
         "Build with SIMD-accelerated code paths. Results in significant performance improvements.",
-    ) orelse true;
+    ) orelse simd: {
+        // We can't build our SIMD dependencies for Wasm. Note that we may
+        // still use SIMD features in the Wasm-builds.
+        if (target.result.cpu.arch.isWasm()) break :simd false;
+
+        break :simd true;
+    };
 
     config.wayland = b.option(
         bool,
@@ -367,6 +374,12 @@ pub fn init(b: *std.Build, appVersion: []const u8) !Config {
         .Debug => true,
         .ReleaseSafe, .ReleaseFast, .ReleaseSmall => false,
     };
+
+    config.emit_themes = b.option(
+        bool,
+        "emit-themes",
+        "Install bundled iTerm2-Color-Schemes Ghostty themes",
+    ) orelse true;
 
     config.emit_webdata = b.option(
         bool,

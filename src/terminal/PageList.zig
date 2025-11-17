@@ -371,6 +371,9 @@ fn verifyIntegrity(self: *const PageList) IntegrityError!void {
     if (comptime !build_options.slow_runtime_safety) return;
     if (self.pause_integrity_checks > 0) return;
 
+    // Our viewport pin should never be garbage
+    assert(!self.viewport_pin.garbage);
+
     // Verify that our cached total_rows matches the actual row count
     const actual_total = self.totalRows();
     if (actual_total != self.total_rows) {
@@ -528,6 +531,8 @@ pub fn reset(self: *PageList) void {
     self.total_rows = self.rows;
 
     // Update all our tracked pins to point to our first page top-left
+    // and mark them as garbage, because it got mangled in a way where
+    // semantically it really doesn't make sense.
     {
         var it = self.tracked_pins.iterator();
         while (it.next()) |entry| {
@@ -535,7 +540,11 @@ pub fn reset(self: *PageList) void {
             p.node = self.pages.first.?;
             p.x = 0;
             p.y = 0;
+            p.garbage = true;
         }
+
+        // Our viewport pin is never garbage
+        self.viewport_pin.garbage = false;
     }
 
     // Move our viewport back to the active area since everything is gone.
@@ -2428,7 +2437,9 @@ pub fn grow(self: *PageList) !?*List.Node {
             p.node = self.pages.first.?;
             p.y = 0;
             p.x = 0;
+            p.garbage = true;
         }
+        self.viewport_pin.garbage = false;
 
         // In this case we do NOT need to update page_size because
         // we're reusing an existing page so nothing has changed.
@@ -3047,13 +3058,16 @@ pub fn eraseRows(
 fn erasePage(self: *PageList, node: *List.Node) void {
     assert(node.next != null or node.prev != null);
 
-    // Update any tracked pins to move to the next page.
+    // Update any tracked pins to move to the previous or next page.
     const pin_keys = self.tracked_pins.keys();
     for (pin_keys) |p| {
         if (p.node != node) continue;
-        p.node = node.next orelse node.prev orelse unreachable;
+        p.node = node.prev orelse node.next orelse unreachable;
         p.y = 0;
         p.x = 0;
+
+        // This doesn't get marked garbage because the tracked pin
+        // movement is sensical.
     }
 
     // Remove the page from the linked list
@@ -3214,50 +3228,6 @@ pub fn getCell(self: *const PageList, pt: point.Point) ?Cell {
         .row_idx = pt_pin.y,
         .col_idx = pt_pin.x,
     };
-}
-
-pub const EncodeUtf8Options = struct {
-    /// The start and end points of the dump, both inclusive. The x will
-    /// be ignored and the full row will always be dumped.
-    tl: Pin,
-    br: ?Pin = null,
-
-    /// If true, this will unwrap soft-wrapped lines. If false, this will
-    /// dump the screen as it is visually seen in a rendered window.
-    unwrap: bool = true,
-
-    /// See Page.EncodeUtf8Options.
-    cell_map: ?*Page.CellMap = null,
-};
-
-/// Encode the pagelist to utf8 to the given writer.
-///
-/// The writer should be buffered; this function does not attempt to
-/// efficiently write and often writes one byte at a time.
-///
-/// Note: this is tested using Screen.dumpString. This is a function that
-/// predates this and is a thin wrapper around it so the tests all live there.
-pub fn encodeUtf8(
-    self: *const PageList,
-    writer: *std.Io.Writer,
-    opts: EncodeUtf8Options,
-) anyerror!void {
-    // We don't currently use self at all. There is an argument that this
-    // function should live on Pin instead but there is some future we might
-    // need state on here so... letting it go.
-    _ = self;
-
-    var page_opts: Page.EncodeUtf8Options = .{
-        .unwrap = opts.unwrap,
-        .cell_map = opts.cell_map,
-    };
-    var iter = opts.tl.pageIterator(.right_down, opts.br);
-    while (iter.next()) |chunk| {
-        const page: *const Page = &chunk.node.data;
-        page_opts.start_y = chunk.start;
-        page_opts.end_y = chunk.end;
-        page_opts.preceding = try page.encodeUtf8(writer, page_opts);
-    }
 }
 
 /// Log a debug diagram of the page list to the provided writer.
@@ -3857,13 +3827,17 @@ pub fn getBottomRight(self: *const PageList, tag: point.Tag) ?Pin {
         },
 
         .viewport => viewport: {
-            const tl = self.getTopLeft(.viewport);
-            break :viewport tl.down(self.rows - 1).?;
+            var br = self.getTopLeft(.viewport);
+            br = br.down(self.rows - 1).?;
+            br.x = br.node.data.size.cols - 1;
+            break :viewport br;
         },
 
         .history => active: {
-            const tl = self.getTopLeft(.active);
-            break :active tl.up(1);
+            var br = self.getTopLeft(.active);
+            br = br.up(1) orelse return null;
+            br.x = br.node.data.size.cols - 1;
+            break :active br;
         },
     };
 }
@@ -3884,8 +3858,9 @@ fn totalRows(self: *const PageList) usize {
     return rows;
 }
 
-/// The total number of pages in this list.
-fn totalPages(self: *const PageList) usize {
+/// The total number of pages in this list. This should only be used
+/// for tests since it is O(N) over the list of pages.
+pub fn totalPages(self: *const PageList) usize {
     var pages: usize = 0;
     var node_ = self.pages.first;
     while (node_) |node| {
@@ -3942,6 +3917,13 @@ pub const Pin = struct {
     node: *List.Node,
     y: size.CellCountInt = 0,
     x: size.CellCountInt = 0,
+
+    /// This is flipped to true for tracked pins that were tracking
+    /// a page that got pruned for any reason and where the tracked pin
+    /// couldn't be moved to a sensical location. Users of the tracked
+    /// pin could use this data and make their own determination of
+    /// semantics.
+    garbage: bool = false,
 
     pub inline fn rowAndCell(self: Pin) struct {
         row: *pagepkg.Row,
@@ -5797,6 +5779,7 @@ test "PageList grow prune scrollback" {
     try testing.expect(p.node == s.pages.first.?);
     try testing.expect(p.x == 0);
     try testing.expect(p.y == 0);
+    try testing.expect(p.garbage);
 
     // Verify the viewport offset cache was invalidated. After pruning,
     // the offset should have changed because we removed rows from
@@ -10679,6 +10662,29 @@ test "PageList reset across two pages" {
     try testing.expect(s.viewport == .active);
     try testing.expect(s.pages.first != null);
     try testing.expectEqual(@as(usize, s.rows), s.totalRows());
+}
+
+test "PageList reset moves tracked pins and marks them as garbage" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var s = try init(alloc, 80, 24, null);
+    defer s.deinit();
+
+    // Create a tracked pin into the active area
+    const p = try s.trackPin(s.pin(.{ .active = .{
+        .x = 42,
+        .y = 12,
+    } }).?);
+    defer s.untrackPin(p);
+
+    s.reset();
+
+    // Our added pin should now be garbage
+    try testing.expect(p.garbage);
+
+    // Viewport pin should not be garbage because it makes sense.
+    try testing.expect(!s.viewport_pin.garbage);
 }
 
 test "PageList clears history" {

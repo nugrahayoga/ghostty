@@ -64,7 +64,7 @@ pub const VTEvent = struct {
         return .{
             .kind = kind,
             .str = str,
-            .cursor = t.screen.cursor,
+            .cursor = t.screens.active.cursor,
             .scrolling_region = t.scrolling_region,
             .metadata = md.unmanaged,
         };
@@ -331,6 +331,15 @@ pub const VTHandler = struct {
 
     pub fn deinit(self: *VTHandler) void {
         cimgui.c.ImGuiTextFilter_destroy(self.filter_text);
+    }
+
+    pub fn vt(
+        self: *VTHandler,
+        comptime action: Stream.Action.Tag,
+        value: Stream.Action.Value(action),
+    ) !void {
+        _ = self;
+        _ = value;
     }
 
     /// This is called with every single terminal action.
